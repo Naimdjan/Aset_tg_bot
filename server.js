@@ -1,78 +1,91 @@
-import express from "express";
-import axios from "axios";
+const express = require("express");
+const axios = require("axios");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "20mb" }));
 
-const BOT_TOKEN = process.env.BOT_TOKEN;          // Render Env
-if (!BOT_TOKEN) console.error("❌ BOT_TOKEN is missing in environment variables!");
+// Render использует PORT из переменных окружения
+const PORT = process.env.PORT || 3000;
 
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+// === ENV переменные (Render -> Environment) ===
+const BOT_TOKEN = process.env.BOT_TOKEN;          // токен телеграм бота
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;  // твой id (не обязательно)
+const TELEGRAM_API = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : null;
 
-// ✅ Healthcheck
+// ---------- helpers ----------
+async function tg(method, payload) {
+  if (!TELEGRAM_API) throw new Error("BOT_TOKEN not set");
+  return axios.post(`${TELEGRAM_API}/${method}`, payload);
+}
+
+// ---------- health ----------
 app.get("/health", (req, res) => {
-  res.status(200).json({ ok: true });
+  res.status(200).json({ ok: true, service: "aset_tg_bot" });
 });
 
-// ✅ Webhook endpoint (под него будем ставить setWebhook)
+// ---------- webhook endpoint ----------
 app.post("/telegram/webhook", async (req, res) => {
+  // ВАЖНО: отвечаем Telegram сразу, чтобы не было повторов/спама
+  res.sendStatus(200);
+
   try {
     const update = req.body;
 
-    // Быстро отвечаем Telegram, чтобы не было ретраев/спама
-    res.sendStatus(200);
-
-    // Обработка сообщений
-    if (update.message?.text) {
+    // 1) Обычные сообщения
+    if (update.message) {
       const chatId = update.message.chat.id;
-      const text = update.message.text.trim();
+      const text = (update.message.text || "").trim();
 
       if (text === "/start") {
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+        await tg("sendMessage", {
           chat_id: chatId,
-          text: "👋 Привет! Главное меню активировано.",
-          reply_markup: {
-            keyboard: [[{ text: "📝 Новая заявка" }, { text: "❌ Отмена" }]],
-            resize_keyboard: true,
-          },
+          text: "✅ Render + Node работает.\n\nКоманды:\n/start\n/getmyid"
         });
         return;
       }
 
-      if (text === "📝 Новая заявка") {
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      if (text === "/getmyid") {
+        const userId = update.message.from?.id;
+        await tg("sendMessage", {
           chat_id: chatId,
-          text: "📞 Введите номер телефона клиента:",
+          text: `Ваш Telegram ID: ${userId}\nChat ID: ${chatId}`
         });
         return;
       }
 
-      if (text === "❌ Отмена") {
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: "❌ Отменено.",
-        });
-        return;
-      }
-
-      // тестовый ответ
-      await axios.post(`${TELEGRAM_API}/sendMessage`, {
-        chat_id: chatId,
-        text: `✅ Получено: ${text}`,
-      });
+      // НЕ отвечаем на всё подряд, чтобы не было ощущения “спама”
+      // Можно включить только для отладки:
+      // await tg("sendMessage", { chat_id: chatId, text: `Получено: ${text}` });
+      return;
     }
 
-    // Обработка inline-кнопок (на будущее)
+    // 2) callback_query (на будущее кнопки)
     if (update.callback_query) {
-      await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, {
-        callback_query_id: update.callback_query.id,
-      });
+      const cb = update.callback_query;
+      const chatId = cb.message.chat.id;
+
+      await tg("answerCallbackQuery", { callback_query_id: cb.id });
+
+      // пример реакции на кнопку:
+      if (cb.data === "ping") {
+        await tg("sendMessage", { chat_id: chatId, text: "pong ✅" });
+      }
+      return;
     }
-  } catch (e) {
-    console.error("Webhook handler error:", e?.response?.data || e.message);
-    // уже ответили 200, чтобы Telegram не ретраил
+  } catch (err) {
+    // если задан ADMIN_CHAT_ID — шлём туда ошибки
+    try {
+      if (ADMIN_CHAT_ID && TELEGRAM_API) {
+        await tg("sendMessage", {
+          chat_id: ADMIN_CHAT_ID,
+          text: `🚨 Ошибка: ${err.message}`
+        });
+      }
+    } catch (_) {}
   }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+// ---------- start server ----------
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
