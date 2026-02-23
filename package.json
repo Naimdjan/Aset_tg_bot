@@ -1,13 +1,76 @@
-{
-  "name": "asetgps-bot",
-  "version": "1.0.0",
-  "main": "server.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "axios": "^1.6.0",
-    "express": "^4.18.2"
-  }
+const express = require("express");
+const axios = require("axios");
+
+const app = express();
+app.use(express.json());
+
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+  console.error("❌ BOT_TOKEN not found in environment variables");
 }
+
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// ✅ health endpoint
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
+// ✅ Telegram webhook
+app.post("/telegram/webhook", async (req, res) => {
+  res.sendStatus(200); // ВАЖНО: сразу отвечаем Telegram
+
+  try {
+    const update = req.body;
+
+    if (update.message && update.message.text) {
+      const chatId = update.message.chat.id;
+      const text = update.message.text;
+
+      if (text === "/start") {
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: "👋 Привет! Главное меню активировано.",
+          reply_markup: {
+            keyboard: [
+              [{ text: "📝 Новая заявка" }],
+              [{ text: "❌ Отмена" }]
+            ],
+            resize_keyboard: true
+          }
+        });
+        return;
+      }
+
+      if (text === "📝 Новая заявка") {
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: "📞 Введите номер телефона клиента:"
+        });
+        return;
+      }
+
+      if (text === "❌ Отмена") {
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: "❌ Отменено."
+        });
+        return;
+      }
+
+      // тестовый ответ
+      await axios.post(`${TELEGRAM_API}/sendMessage`, {
+        chat_id: chatId,
+        text: `✅ Получено: ${text}`
+      });
+    }
+
+  } catch (error) {
+    console.error("Webhook error:", error.response?.data || error.message);
+  }
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
