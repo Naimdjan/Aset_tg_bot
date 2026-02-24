@@ -77,6 +77,20 @@ function cleanupDedupe() {
   }
 }
 
+// Удаляем закрытые/выполненные заявки старше 7 дней (защита от утечки памяти)
+function cleanupOldOrders() {
+  const maxAge = 7 * 24 * 60 * 60 * 1000;
+  const t = nowTs();
+  for (const [id, order] of orders.entries()) {
+    const terminal = ["CLOSED", "DECLINED_BY_MASTER"].includes(order.status);
+    const ts = order.closedAt || order.completedAt || order.createdAt;
+    if (terminal && ts && t - new Date(ts).getTime() > maxAge) {
+      orders.delete(id);
+    }
+  }
+}
+setInterval(cleanupOldOrders, 60 * 60 * 1000); // раз в час
+
 function setState(chatId, step, data = {}) {
   userState.set(String(chatId), { step, data });
 }
@@ -102,12 +116,21 @@ async function editMessage(chatId, messageId, text, extra = {}) {
   return tg("editMessageText", { chat_id: chatId, message_id: messageId, text, ...extra });
 }
 
-async function answerCb(callbackQueryId) {
-  return tg("answerCallbackQuery", { callback_query_id: callbackQueryId });
+async function answerCb(callbackQueryId, text = null, showAlert = false) {
+  const payload = { callback_query_id: callbackQueryId };
+  if (text) { payload.text = text; payload.show_alert = showAlert; }
+  return tg("answerCallbackQuery", payload).catch(() => {});
 }
 
 async function sendPhoto(chatId, fileId, caption) {
   return tg("sendPhoto", { chat_id: chatId, photo: fileId, caption });
+}
+
+// Безопасная отправка — не бросает исключение при ошибке Telegram API
+async function safeSend(chatId, text, extra = {}) {
+  return sendMessage(chatId, text, extra).catch((e) =>
+    console.warn(`safeSend to ${chatId} failed: ${e?.message || e}`)
+  );
 }
 
 async function sendDocument(chatId, filePath, caption) {
@@ -785,7 +808,8 @@ async function onCallback(cb) {
   const messageId = cb.message.message_id;
   const data = cb.data || "";
 
-  await answerCb(cb.id);
+  // Сразу отвечаем на callback (убирает спиннер), не ожидая
+  answerCb(cb.id).catch(() => {});
 
   if (BOT_PASSWORD && !isAuthorized(chatId)) {
     await sendMessage(chatId, "🔐 Доступ закрыт. Введите /start и укажите пароль.");
@@ -1003,13 +1027,15 @@ async function onCallback(cb) {
       });
     }
 
+    const dayLabel = dayChoice === "TODAY" ? " (сегодня)" : dayChoice === "TOMORROW" ? " (завтра)" : "";
+    const acceptMsg = `✅ Мастер ${order.masterName} взял заявку #${order.id}${dayLabel}.`;
+
     if (order.adminChatId) {
-      const dayLabel = dayChoice === "TODAY" ? " (сегодня)" : dayChoice === "TOMORROW" ? " (завтра)" : "";
-      await sendMessage(
-        order.adminChatId,
-        `✅ Мастер ${order.masterName} взял заявку #${order.id}${dayLabel}.`,
-        { reply_markup: adminMenuReplyKeyboard() }
-      );
+      await sendMessage(order.adminChatId, acceptMsg, { reply_markup: adminMenuReplyKeyboard() });
+    }
+    // Супер-админ всегда получает уведомление
+    if (String(order.adminChatId) !== String(SUPER_ADMIN_ID)) {
+      await safeSend(SUPER_ADMIN_ID, acceptMsg);
     }
 
     return;
@@ -1279,18 +1305,13 @@ async function onCallback(cb) {
     await sendMessage(chatId, "✅ Готово.", { reply_markup: masterMenuReplyKeyboard() });
 
     const adminChatId = order.adminChatId || MAIN_ADMIN_ID;
-    await sendMessage(
-      adminChatId,
+    const doneCloseKb = { inline_keyboard: [[{ text: "🔒 Закрыть заявку", callback_data: `ADMIN_CLOSE:${order.id}` }]] };
+    const doneMsg =
       `✅ Заявка #${order.id} выполнена.\n` +
-        `👷 Мастер: ${order.masterName}\n` +
-        `🚗/🏢: ${logisticsLabel(order)}\n\n` +
-        `Нажмите кнопку ниже, чтобы закрыть заявку официально.`,
-      {
-        reply_markup: {
-          inline_keyboard: [[{ text: "🔒 Закрыть заявку", callback_data: `ADMIN_CLOSE:${order.id}` }]],
-        },
-      }
-    );
+      `👷 Мастер: ${order.masterName}\n` +
+      `🚗/🏢: ${logisticsLabel(order)}\n\n` +
+      `Нажмите кнопку ниже, чтобы официально закрыть заявку.`;
+    await sendMessage(adminChatId, doneMsg, { reply_markup: doneCloseKb });
     if (order.carNumberPhotoId) {
       await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
     } else if (order.carNumberSkipped) {
@@ -1311,12 +1332,9 @@ async function onCallback(cb) {
     } else if (order.dutSkipped) {
       await sendMessage(adminChatId, "📡 DUT: фото не приложено (мастер выбрал «Без фото DUT»)");
     }
-    // Копия уведомления супер-админу (если закрыл не он)
-    if (adminChatId !== SUPER_ADMIN_ID) {
-      await sendMessage(
-        SUPER_ADMIN_ID,
-        `✅ Заявка #${order.id} выполнена мастером ${order.masterName}. Ждём закрытия администратором.`
-      );
+    // Кнопка закрытия — и обычному админу и супер-админу
+    if (String(adminChatId) !== String(SUPER_ADMIN_ID)) {
+      await safeSend(SUPER_ADMIN_ID, doneMsg, { reply_markup: doneCloseKb });
     }
     return;
   }
@@ -1329,12 +1347,22 @@ async function onCallback(cb) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.");
       return;
     }
+    // Проверка: закрыть может только назначенный администратор или супер-админ
+    const isAllowedToClose =
+      String(chatId) === String(SUPER_ADMIN_ID) ||
+      String(chatId) === String(ADMIN_CHAT_ID) ||
+      String(chatId) === String(order.adminChatId);
+    if (!isAllowedToClose) {
+      await sendMessage(chatId, "⚠️ У вас нет прав для закрытия этой заявки.");
+      return;
+    }
     if (order.status === "CLOSED") {
       await editMessage(chatId, messageId, `🔒 Заявка #${order.id} уже закрыта.`, { reply_markup: { inline_keyboard: [] } });
       return;
     }
     order.status = "CLOSED";
     order.closedAt = new Date().toISOString();
+    order.closedBy = chatId;
     await editMessage(
       chatId, messageId,
       `🔒 Заявка #${order.id} закрыта.\n👷 Мастер: ${order.masterName}\n📞 Клиент: ${order.phone}`,
@@ -1342,11 +1370,11 @@ async function onCallback(cb) {
     );
     // Уведомить мастера
     if (order.masterTgId) {
-      await sendMessage(order.masterTgId, `🔒 Заявка #${order.id} официально закрыта администратором.`);
+      await safeSend(order.masterTgId, `🔒 Заявка #${order.id} официально закрыта администратором.`);
     }
-    // Уведомить супер-админа если закрыл не он
-    if (chatId !== SUPER_ADMIN_ID) {
-      await sendMessage(SUPER_ADMIN_ID, `🔒 Заявка #${order.id} закрыта администратором.`);
+    // Если закрыл обычный админ — уведомить супер-админа
+    if (String(chatId) !== String(SUPER_ADMIN_ID)) {
+      await safeSend(SUPER_ADMIN_ID, `🔒 Заявка #${order.id} закрыта администратором (${order.masterName}).`);
     }
     return;
   }
@@ -1594,7 +1622,7 @@ async function onCallback(cb) {
 
     const selectedOpts = st.data.selectedOpts || [];
     if (selectedOpts.length === 0) {
-      await answerCb(cb.id, "⚠️ Выберите хотя бы одно устройство");
+      await sendMessage(chatId, "⚠️ Выберите хотя бы одно устройство из списка.");
       return;
     }
 
@@ -1626,6 +1654,21 @@ function logisticsLabel(order) {
   if (order.logistics === "VISIT") return "🚗 Выезд к клиенту";
   if (order.logistics === "COME") return "🏢 Клиент сам приедет";
   return "-";
+}
+
+const STATUS_LABELS = {
+  NEW:                   "Новая",
+  SENT_TO_MASTER:        "Отправлена мастеру",
+  ACCEPTED_BY_MASTER:    "Принята мастером",
+  DECLINED_BY_MASTER:    "Отклонена мастером",
+  WAIT_ADMIN_CONFIRM_TIME: "Ожидает подтверждения времени",
+  TIME_CONFIRMED:        "Время подтверждено",
+  CLIENT_ARRIVED:        "Клиент прибыл",
+  DONE:                  "Выполнена",
+  CLOSED:                "Закрыта",
+};
+function statusLabel(status) {
+  return STATUS_LABELS[status] || status || "—";
 }
 
 // Утилиты для дат
@@ -1850,7 +1893,7 @@ async function sendPendingReport(chatId, opts = {}) {
 
   const byStatus = {};
   for (const o of items) {
-    const s = o.status || "—";
+    const s = statusLabel(o.status);
     byStatus[s] = (byStatus[s] || 0) + 1;
   }
   const statusLines = Object.entries(byStatus)
@@ -1912,7 +1955,7 @@ function buildExcelReport(from, to, opts = {}) {
       o.address || "—",
       o.phone || "—",
       (o.adminComment || "").replace(/\n/g, " "),
-      o.status || "—",
+      statusLabel(o.status),
     ]);
   });
 
@@ -2009,7 +2052,7 @@ function buildExcelReportPending(opts = {}) {
       o.address || "—",
       o.phone || "—",
       (o.adminComment || "").replace(/\n/g, " "),
-      o.status || "—",
+      statusLabel(o.status),
     ]);
   });
 
@@ -2047,8 +2090,14 @@ function buildExcelReportPending(opts = {}) {
   return filePath;
 }
 
+function optionsLabel(order) {
+  if (order.type !== "INSTALL") return "";
+  const opts = order.options && order.options.length ? order.options : (order.option ? [order.option] : []);
+  return opts.length ? opts.join(", ") : "-";
+}
+
 function formatOrderForMaster(order) {
-  const optLine = order.type === "INSTALL" ? `📦 Опция: ${order.option || "-"}` : "";
+  const optLine = order.type === "INSTALL" ? `📦 Устройства: ${optionsLabel(order)}` : "";
   const addrLine = order.logistics === "VISIT" ? `📍 Адрес: ${order.address || "-"}` : "";
   const commentLine = `💬 Комментарий:\n${order.adminComment || "-"}`;
 
@@ -2065,7 +2114,7 @@ function formatOrderForMaster(order) {
 }
 
 function formatAdminConfirm(order) {
-  const optLine = order.type === "INSTALL" ? `📦 Опция: ${order.option || "-"}` : "";
+  const optLine = order.type === "INSTALL" ? `📦 Устройства: ${optionsLabel(order)}` : "";
   const addrLine = order.logistics === "VISIT" ? `📍 Адрес: ${order.address || "-"}` : "";
 
   return (
