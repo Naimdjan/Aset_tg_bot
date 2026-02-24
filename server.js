@@ -4,273 +4,408 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-// ======================
+// =============================
 // ENV
-// ======================
+// =============================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) console.error("❌ BOT_TOKEN not found in environment variables");
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// ======================
-
+// =============================
+// CONFIG: Masters (пока вручную)
+// =============================
 const MASTERS = [
-  { id: "abdulakhim", name: "Абдулaхим", city: "Худжанд", telegramId: 7862998301 },
-  { id: "ibrohimjon", name: "Иброхимчон", city: "Душанбе", telegramId: 7692783802 },
-  { id: "akali",      name: "Акаи Шухрат", city: "Бохтар", telegramId: 7862998301 }
+  { tgId: 7862998301, name: "Абдулахим", city: "Худжанд" },
+  { tgId: 7692783802, name: "Иброхимчон", city: "Душанбе" },
+  { tgId: 7862998301, name: "Акаи Шухрат", city: "Бохтар" },
 ];
 
-// ======================
-// Simple in-memory state
-// ======================
-const userState = new Map(); // chatId -> { step, data }
+// Опции (выбирает АДМИН)
+const OPTIONS = [
+  "FMB920",
+  "FMB140",
+  "FMB140+Temp.",
+  "FMB125+DUT",
+  "FMB125+Temp.",
+  "Video",
+  "Другое",
+];
 
-// ======================
-// Helpers
-// ======================
-async function tg(method, payload) {
-  try {
-    return await axios.post(`${TELEGRAM_API}/${method}`, payload);
-  } catch (e) {
-    const msg = e?.response?.data?.description || e.message;
-    console.log("TG error:", msg);
+// =============================
+// In-memory storage (для теста)
+// Потом заменим на Google Sheets.
+// =============================
+let lastOrderId = 0;
+const orders = new Map(); // orderId -> order
+const userState = new Map(); // chatId -> { step, data }
+const dedupe = new Map(); // update_id -> ts
+
+function nowTs() {
+  return Date.now();
+}
+
+function cleanupDedupe() {
+  const ttl = 60 * 1000; // 1 minute
+  const t = nowTs();
+  for (const [k, v] of dedupe.entries()) {
+    if (t - v > ttl) dedupe.delete(k);
   }
 }
 
+function setState(chatId, step, data = {}) {
+  userState.set(String(chatId), { step, data });
+}
+function getState(chatId) {
+  return userState.get(String(chatId)) || null;
+}
+function clearState(chatId) {
+  userState.delete(String(chatId));
+}
+
+// =============================
+// Telegram helpers
+// =============================
+async function tg(method, payload) {
+  return axios.post(`${TELEGRAM_API}/${method}`, payload, { timeout: 20000 });
+}
+
+async function sendMessage(chatId, text, extra = {}) {
+  return tg("sendMessage", { chat_id: chatId, text, ...extra });
+}
+
+async function editMessage(chatId, messageId, text, extra = {}) {
+  return tg("editMessageText", { chat_id: chatId, message_id: messageId, text, ...extra });
+}
+
+async function answerCb(callbackQueryId) {
+  return tg("answerCallbackQuery", { callback_query_id: callbackQueryId });
+}
+
+// =============================
+// UI builders
+// =============================
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "📝 Новая заявка", callback_data: "new_request" }],
-      [{ text: "🆔 Мой ID", callback_data: "getmyid" }],
-      [{ text: "❌ Отмена", callback_data: "cancel" }]
-    ]
+      [{ text: "📝 Новая заявка", callback_data: "ADMIN_NEW" }],
+      [{ text: "🆔 Мой ID", callback_data: "GET_MY_ID" }],
+      [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+    ],
   };
 }
 
 function mastersKeyboard() {
-  // Кнопки мастеров: Город | Имя
-  const rows = MASTERS.map((m) => ([
-    { text: `📍 ${m.city} | 👷 ${m.name}`, callback_data: `pick_master:${m.id}` }
-  ]));
-
-  // В конце добавим "Отмена"
-  rows.push([{ text: "❌ Отмена", callback_data: "cancel" }]);
-
+  const rows = MASTERS.map((m) => [
+    { text: `📍 ${m.city} | 👷 ${m.name}`, callback_data: `ADMIN_PICK_MASTER:${m.tgId}` },
+  ]);
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
 }
 
-function getMasterById(masterId) {
-  return MASTERS.find((m) => m.id === masterId) || null;
+function orderTypeKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "🛠 Монтаж", callback_data: "ADMIN_TYPE:INSTALL" }],
+      [{ text: "🧰 Ремонт / другое", callback_data: "ADMIN_TYPE:REPAIR" }],
+      [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+    ],
+  };
 }
 
-// ======================
+function optionsKeyboard(orderId) {
+  const rows = [];
+  for (let i = 0; i < OPTIONS.length; i += 2) {
+    const a = OPTIONS[i];
+    const b = OPTIONS[i + 1];
+    const row = [{ text: a, callback_data: `ADMIN_OPT:${orderId}:${a}` }];
+    if (b) row.push({ text: b, callback_data: `ADMIN_OPT:${orderId}:${b}` });
+    rows.push(row);
+  }
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
+}
+
+// =============================
 // Routes
-// ======================
+// =============================
 app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
 
 app.post("/telegram/webhook", async (req, res) => {
-  // ВАЖНО: сразу 200, чтобы Telegram не ретраил
+  // IMPORTANT: respond fast
   res.sendStatus(200);
 
-  const update = req.body;
-
   try {
-    if (update.message) await handleMessage(update.message);
-    if (update.callback_query) await handleCallback(update.callback_query);
-  } catch (err) {
-    console.log("Webhook handler error:", err?.message || err);
+    const update = req.body || {};
+    cleanupDedupe();
+
+    // DEDUPE update_id
+    if (typeof update.update_id === "number") {
+      if (dedupe.has(update.update_id)) return;
+      dedupe.set(update.update_id, nowTs());
+    }
+
+    if (update.message) await onMessage(update.message);
+    if (update.callback_query) await onCallback(update.callback_query);
+  } catch (e) {
+    console.error("Webhook error:", e?.message || e);
   }
 });
 
-// ======================
+// =============================
 // Handlers
-// ======================
-async function handleMessage(message) {
+// =============================
+async function onMessage(message) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
 
-  // Команды
+  // Commands
   if (text === "/start") {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "✅ Render + Node работает.\n\nВыберите действие:",
-      reply_markup: mainMenuKeyboard()
-    });
+    await sendMessage(chatId, "👋 Привет! Главное меню активировано.", { reply_markup: mainMenuKeyboard() });
     return;
   }
-
   if (text === "/getmyid") {
-    const userId = message.from?.id;
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `Ваш Telegram ID: ${userId}\nChat ID: ${chatId}`
-    });
+    await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`);
     return;
   }
 
   // FSM
-  const st = userState.get(chatId);
+  const st = getState(chatId);
+  if (!st) return;
 
-  if (!st) {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "Меню:",
-      reply_markup: mainMenuKeyboard()
-    });
+  // ADMIN: ждём телефон
+  if (st.step === "ADMIN_WAIT_PHONE") {
+    st.data.phone = text;
+    setState(chatId, "ADMIN_WAIT_MASTER", st.data);
+    await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", { reply_markup: mastersKeyboard() });
     return;
   }
 
-  // Шаг 1: телефон
-  if (st.step === "WAIT_PHONE") {
-    st.data.client_phone = text;
-    st.step = "WAIT_OPTIONS";
-    userState.set(chatId, st);
-
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "📦 Укажите *опции* (например: FMB920 + реле):",
-      parse_mode: "Markdown"
-    });
-    return;
-  }
-
-  // Шаг 2: опции -> выбор мастера (город подтянется по мастеру)
-  if (st.step === "WAIT_OPTIONS") {
-    st.data.options = text;
-    st.step = "WAIT_MASTER";
-    userState.set(chatId, st);
-
-    if (!MASTERS.length) {
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "⚠️ В коде не заполнен список мастеров (MASTERS)."
-      });
-      userState.delete(chatId);
+  // ADMIN: ждём комментарий (для монтажа/ремонта/другого)
+  if (st.step === "ADMIN_WAIT_COMMENT") {
+    const orderId = st.data.orderId;
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuKeyboard() });
       return;
     }
 
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "🗺 Выберите мастера (город подтянется автоматически):",
-      reply_markup: mastersKeyboard()
-    });
+    order.adminComment = text;
+    order.status = "SENT_TO_MASTER";
+
+    clearState(chatId);
+
+    // отправка мастеру
+    await sendOrderToMaster(order);
+
+    // подтверждение админу
+    await sendMessage(
+      chatId,
+      formatAdminConfirm(order),
+      { reply_markup: mainMenuKeyboard() }
+    );
     return;
   }
-
-  // Если мы ждём мастера, а админ пишет текст — просто напомним
-  if (st.step === "WAIT_MASTER") {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "Нужно выбрать мастера кнопкой ниже 👇",
-      reply_markup: mastersKeyboard()
-    });
-    return;
-  }
-
-  // fallback
-  userState.delete(chatId);
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: "Состояние сброшено. Меню:",
-    reply_markup: mainMenuKeyboard()
-  });
 }
 
-async function handleCallback(cb) {
+async function onCallback(cb) {
   const chatId = cb.message.chat.id;
-  const data = cb.data;
+  const messageId = cb.message.message_id;
+  const data = cb.data || "";
 
-  // убрать "часики"
-  await tg("answerCallbackQuery", { callback_query_id: cb.id });
+  await answerCb(cb.id);
 
-  if (data === "getmyid") {
-    const userId = cb.from?.id;
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `Ваш Telegram ID: ${userId}\nChat ID: ${chatId}`
-    });
+  // Cancel
+  if (data === "CANCEL") {
+    clearState(chatId);
+    await editMessage(chatId, messageId, "❌ Отменено.", { reply_markup: mainMenuKeyboard() });
     return;
   }
 
-  if (data === "cancel") {
-    userState.delete(chatId);
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "❌ Отменено.",
-      reply_markup: mainMenuKeyboard()
-    });
+  if (data === "GET_MY_ID") {
+    await sendMessage(chatId, `Ваш Telegram ID: ${cb.from.id}\nChat ID: ${chatId}`, { reply_markup: mainMenuKeyboard() });
     return;
   }
 
-  if (data === "new_request") {
-    userState.set(chatId, { step: "WAIT_PHONE", data: {} });
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "📝 Новая заявка.\n📞 Введите номер телефона клиента:"
-    });
+  // ADMIN: New order
+  if (data === "ADMIN_NEW") {
+    setState(chatId, "ADMIN_WAIT_PHONE", {});
+    await editMessage(
+      chatId,
+      messageId,
+      "📞 Введите номер телефона клиента:",
+      { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
+    );
     return;
   }
 
-  // Выбор мастера
-  if (data.startsWith("pick_master:")) {
-    const st = userState.get(chatId);
-    if (!st || st.step !== "WAIT_MASTER") {
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "Сначала создайте заявку: нажмите 📝 Новая заявка",
-        reply_markup: mainMenuKeyboard()
-      });
+  // ADMIN: picked master
+  if (data.startsWith("ADMIN_PICK_MASTER:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_MASTER") {
+      await sendMessage(chatId, "⚠️ Сессия устарела. Нажмите «Новая заявка».", { reply_markup: mainMenuKeyboard() });
       return;
     }
 
-    const masterId = data.split(":")[1];
-    const master = getMasterById(masterId);
-
+    const masterTgId = Number(data.split(":")[1]);
+    const master = MASTERS.find((m) => Number(m.tgId) === masterTgId);
     if (!master) {
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "⚠️ Мастер не найден. Проверь список MASTERS в коде."
-      });
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: mainMenuKeyboard() });
       return;
     }
 
-    // город подтягиваем из мастера
-    st.data.master_name = master.name;
-    st.data.city = master.city;
-    st.data.master_telegram_id = master.telegramId;
+    const orderId = String(++lastOrderId);
+    const order = {
+      id: orderId,
+      createdAt: new Date().toISOString(),
+      phone: st.data.phone,
 
-    // Итог
-    const summary =
-      `✅ Заявка собрана:\n` +
-      `📞 Телефон: ${st.data.client_phone}\n` +
-      `📍 Город: ${st.data.city}\n` +
-      `👷 Мастер: ${st.data.master_name}\n` +
-      `📦 Опции: ${st.data.options}\n\n` +
-      `Дальше подключим Google Sheets и отправку мастеру.`;
+      masterTgId: master.tgId,
+      masterName: master.name,
+      city: master.city,
 
-    userState.delete(chatId);
+      type: null,          // INSTALL | REPAIR
+      option: null,        // для INSTALL
+      adminComment: "",
 
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: summary,
-      reply_markup: mainMenuKeyboard()
-    });
+      status: "NEW",
+    };
+    orders.set(orderId, order);
 
-    // (следующий шаг позже): отправить мастеру уведомление
-    // await tg("sendMessage", { chat_id: master.telegramId, text: `🛠 Новая заявка...\n...` });
+    setState(chatId, "ADMIN_WAIT_TYPE", { orderId });
 
+    await editMessage(
+      chatId,
+      messageId,
+      `✅ Мастер выбран.\n📍 Город: ${order.city}\n👷 Мастер: ${order.masterName}\n\nВыберите тип заявки:`,
+      { reply_markup: orderTypeKeyboard() }
+    );
     return;
   }
 
-  // неизвестная кнопка
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: "Неизвестное действие. Меню:",
-    reply_markup: mainMenuKeyboard()
-  });
+  // ADMIN: picked type
+  if (data.startsWith("ADMIN_TYPE:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_TYPE") {
+      await sendMessage(chatId, "⚠️ Сессия устарела. Нажмите «Новая заявка».", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    const orderId = st.data.orderId;
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    const type = data.split(":")[1];
+    order.type = type;
+
+    if (type === "REPAIR") {
+      // ремонт: сразу просим комментарий
+      setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
+      await editMessage(
+        chatId,
+        messageId,
+        `🧰 Ремонт / другое\n\nНапишите комментарий (что сломано / что нужно сделать):`,
+        { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
+      );
+      return;
+    }
+
+    if (type === "INSTALL") {
+      // монтаж: админ выбирает опцию
+      setState(chatId, "ADMIN_WAIT_OPTION", { orderId });
+      await editMessage(
+        chatId,
+        messageId,
+        "🛠 Монтаж\n\nВыберите опцию:",
+        { reply_markup: optionsKeyboard(orderId) }
+      );
+      return;
+    }
+  }
+
+  // ADMIN: picked option
+  if (data.startsWith("ADMIN_OPT:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_OPTION") {
+      await sendMessage(chatId, "⚠️ Сессия устарела. Нажмите «Новая заявка».", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    const parts = data.split(":");
+    const orderId = parts[1];
+    const option = parts.slice(2).join(":");
+
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    order.option = option;
+
+    // после выбора опции — ВСЕГДА комментарий админа (несколько устройств/модель/доп. работы)
+    setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
+
+    const hint =
+      "✍️ Напишите комментарий.\n" +
+      "Например: «2 устройства: FMB920 + FMB125, поставить реле, SIM клиента, серийники позже»\n" +
+      "или «Другая модель: …»";
+
+    await editMessage(
+      chatId,
+      messageId,
+      `✅ Опция выбрана: ${order.option}\n\n${hint}`,
+      { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
+    );
+    return;
+  }
 }
 
-// ======================
-// Start
-// ======================
+// =============================
+// Formatting / sending
+// =============================
+function formatOrderForMaster(order) {
+  const typeLabel = order.type === "REPAIR" ? "🧰 Ремонт / другое" : "🛠 Монтаж";
+  const optLine = order.type === "INSTALL" ? `📦 Опция: ${order.option || "-"}` : "";
+  const commentLine = `💬 Комментарий:\n${order.adminComment || "-"}`;
+
+  return (
+    `${typeLabel} #${order.id}\n` +
+    `📞 Телефон: ${order.phone}\n` +
+    `📍 Город: ${order.city}\n` +
+    `👷 Мастер: ${order.masterName}\n` +
+    (optLine ? `${optLine}\n` : "") +
+    `\n${commentLine}`
+  );
+}
+
+function formatAdminConfirm(order) {
+  const typeLabel = order.type === "REPAIR" ? "Ремонт/другое" : "Монтаж";
+  const optLine = order.type === "INSTALL" ? `📦 Опция: ${order.option || "-"}` : "";
+  return (
+    `✅ Заявка #${order.id} отправлена мастеру.\n` +
+    `📞 Телефон: ${order.phone}\n` +
+    `📍 Город: ${order.city}\n` +
+    `👷 Мастер: ${order.masterName}\n` +
+    `🧾 Тип: ${typeLabel}\n` +
+    (optLine ? `${optLine}\n` : "") +
+    `💬 Комментарий: ${order.adminComment || "-"}`
+  );
+}
+
+async function sendOrderToMaster(order) {
+  const text = formatOrderForMaster(order);
+  await sendMessage(order.masterTgId, text, { reply_markup: mainMenuKeyboard() });
+}
+
+// =============================
+// Start server
+// =============================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
