@@ -363,22 +363,63 @@ function masterOrderKeyboard(orderId) {
   };
 }
 
+// Возвращает предупреждение о пропущенных фото пробега/номера,
+// либо null если всё заполнено.
+function getMissingPhotoWarning(order) {
+  const devPhotos = order.devicePhotos || {};
+  const slots = getPhotoSlots(order);
+  const unitWarnings = {};
+
+  for (const slot of slots) {
+    if (slot.photoType !== "odometer" && slot.photoType !== "plate") continue;
+    const fid = devPhotos[slot.key];
+    if (fid && fid !== "SKIPPED") continue; // фото есть — всё OK
+    const unitKey = `${slot.deviceName}_${slot.unitIdx}`;
+    if (!unitWarnings[unitKey]) unitWarnings[unitKey] = { label: `${slot.deviceName}-${slot.unitIdx + 1}`, missing: [] };
+    unitWarnings[unitKey].missing.push(slot.photoType === "odometer" ? "пробег" : "номер");
+  }
+
+  const lines = Object.values(unitWarnings)
+    .filter(u => u.missing.length)
+    .map(u => `• ${u.label}: нет фото ${u.missing.join(" и ")}`);
+
+  return lines.length ? `⚠️ Отсутствуют фото:\n${lines.join("\n")}` : null;
+}
+
 // Кнопки для фото по прибытии клиента.
 // Каждое устройство даёт: Фото X-N (обяз.), DUT для X-N (обяз., только FMB125+DUT),
 // Пробег для X-N (необяз.), Номер для X-N (необяз.).
+// Фото X-N и DUT для X-N ставятся рядом на одной строке.
 // Аксессуары (Реле, Temp.) — без фото.
 function masterArrivalPhotoKeyboard(orderId, order) {
   const rows = [];
   const devPhotos = order.devicePhotos || {};
-  const slots = getPhotoSlots(order);
+  const pending = getPhotoSlots(order).filter(s => devPhotos[s.key] === undefined);
 
-  for (const slot of slots) {
-    if (devPhotos[slot.key] !== undefined) continue; // уже заполнен
-    const row = [{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
-    if (!slot.required) {
-      row.push({ text: "⏭ Без", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
+  let i = 0;
+  while (i < pending.length) {
+    const slot = pending[i];
+    // Если текущий слот — device, а следующий — dut того же устройства → ставим рядом
+    const next = pending[i + 1];
+    if (
+      slot.photoType === "device" &&
+      next?.photoType === "dut" &&
+      next?.deviceName === slot.deviceName &&
+      next?.unitIdx === slot.unitIdx
+    ) {
+      rows.push([
+        { text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` },
+        { text: `📷 ${next.label}`,  callback_data: `MASTER_PHOTO:${orderId}:${next.key}` },
+      ]);
+      i += 2;
+    } else {
+      const row = [{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
+      if (!slot.required) {
+        row.push({ text: "⏭ Без", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
+      }
+      rows.push(row);
+      i++;
     }
-    rows.push(row);
   }
 
   if (rows.length === 0) return null;
@@ -833,6 +874,8 @@ async function onMessage(message) {
 
     // Все фото/пропуски собраны — показываем кнопку «Выполнено»
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
+    const warnMsg = getMissingPhotoWarning(order);
+    if (warnMsg) await sendMessage(chatId, warnMsg);
     await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены.`);
     await sendMessage(
       chatId,
@@ -1385,6 +1428,8 @@ async function onCallback(cb) {
 
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
     await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены.`);
+    const warnSkip = getMissingPhotoWarning(order);
+    if (warnSkip) await sendMessage(chatId, warnSkip);
     await sendMessage(
       chatId,
       `<b>ПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».</b>`,
