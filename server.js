@@ -291,6 +291,11 @@ function masterArrivalPhotoKeyboard(orderId, order) {
   const hasOdometer = order.odometerPhotoId || order.odometerSkipped;
   const hasDevice = order.devicePhotoId || order.deviceSkipped;
 
+  // DUT: нужно фото если в выбранных устройствах есть DUT
+  const allOptions = order.options && order.options.length ? order.options : (order.option ? [order.option] : []);
+  const needDut = allOptions.some(o => o.includes("DUT"));
+  const hasDut = order.dutPhotoId || order.dutSkipped;
+
   if (!hasNumber) {
     rows.push([
       { text: "📷 Фото номера", callback_data: `MASTER_PHOTO:${orderId}:PLATE` },
@@ -307,6 +312,12 @@ function masterArrivalPhotoKeyboard(orderId, order) {
     rows.push([
       { text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` },
       { text: "⏭ Без устройства", callback_data: `MASTER_SKIP:${orderId}:DEVICE` },
+    ]);
+  }
+  if (needDut && !hasDut) {
+    rows.push([
+      { text: "📷 Фото DUT", callback_data: `MASTER_PHOTO:${orderId}:DUT` },
+      { text: "⏭ Без фото DUT", callback_data: `MASTER_SKIP:${orderId}:DUT` },
     ]);
   }
   if (rows.length === 0) return null;
@@ -411,17 +422,20 @@ function masterHourKeyboard(orderId, yyyymmdd) {
   return { inline_keyboard: rows };
 }
 
-// ✅ FIX: передаём индекс опции, а не текст (чтобы работали FMB140+Temp. и т.п.)
-function optionsKeyboard(orderId) {
+// Мульти-выбор: selected — массив выбранных индексов
+function optionsKeyboard(orderId, selected = []) {
   const rows = [];
   for (let i = 0; i < OPTIONS.length; i += 2) {
     const row = [
-      { text: OPTIONS[i], callback_data: `ADMIN_OPT:${orderId}:${i}` },
+      { text: (selected.includes(i) ? "✅ " : "") + OPTIONS[i], callback_data: `ADMIN_OPT:${orderId}:${i}` },
     ];
     if (OPTIONS[i + 1]) {
-      row.push({ text: OPTIONS[i + 1], callback_data: `ADMIN_OPT:${orderId}:${i + 1}` });
+      row.push({ text: (selected.includes(i + 1) ? "✅ " : "") + OPTIONS[i + 1], callback_data: `ADMIN_OPT:${orderId}:${i + 1}` });
     }
     rows.push(row);
+  }
+  if (selected.length > 0) {
+    rows.push([{ text: `✅ Подтвердить выбор (${selected.length})`, callback_data: `ADMIN_OPT_CONFIRM:${orderId}` }]);
   }
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
@@ -704,6 +718,7 @@ async function onMessage(message) {
     if (photoType === "PLATE") order.carNumberPhotoId = fileId;
     else if (photoType === "ODOMETER") order.odometerPhotoId = fileId;
     else if (photoType === "DEVICE") order.devicePhotoId = fileId;
+    else if (photoType === "DUT") order.dutPhotoId = fileId;
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     if (kb) {
@@ -716,14 +731,16 @@ async function onMessage(message) {
 
     // Все фото/пропуски собраны — показываем кнопку «Выполнено»
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
+    await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены.`);
     await sendMessage(
       chatId,
-      `✅ Все данные по заявке #${order.id} сохранены.\nПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».`,
+      `<b>ПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».</b>`,
       {
-      reply_markup: {
-        inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
-      },
-    }
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
+        },
+      }
     );
     return;
   }
@@ -972,6 +989,8 @@ async function onCallback(cb) {
       return;
     }
 
+    const dayChoice = data.split(":")[2]; // TODAY | TOMORROW
+
     order.status = "ACCEPTED_BY_MASTER";
     await editMessage(
       chatId,
@@ -980,16 +999,33 @@ async function onCallback(cb) {
     );
 
     const now = new Date();
-    const yyyymm = formatYyyymm(now.getFullYear(), now.getMonth() + 1);
-    setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
-    await sendMessage(chatId, "📅 Выберите дату визита:", {
-      reply_markup: masterCalendarKeyboard(orderId, yyyymm),
-    });
+
+    if (dayChoice === "TODAY" || dayChoice === "TOMORROW") {
+      // Пропускаем календарь — сразу выбор часа
+      const target = new Date(now);
+      if (dayChoice === "TOMORROW") target.setDate(target.getDate() + 1);
+      order.acceptPlannedDayAt = target.toISOString();
+
+      const yyyymmdd = `${target.getFullYear()}${pad2(target.getMonth() + 1)}${pad2(target.getDate())}`;
+      setState(chatId, "MASTER_PICK_HOUR", { orderId, yyyymmdd });
+      const dayLabel = dayChoice === "TODAY" ? "сегодня" : "завтра";
+      await sendMessage(chatId, `🕒 Вы берёте заявку на ${dayLabel}. Выберите час:`, {
+        reply_markup: masterHourKeyboard(orderId, yyyymmdd),
+      });
+    } else {
+      // Обычный поток — выбор даты через календарь
+      const yyyymm = formatYyyymm(now.getFullYear(), now.getMonth() + 1);
+      setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
+      await sendMessage(chatId, "📅 Выберите дату визита:", {
+        reply_markup: masterCalendarKeyboard(orderId, yyyymm),
+      });
+    }
 
     if (order.adminChatId) {
+      const dayLabel = dayChoice === "TODAY" ? " (сегодня)" : dayChoice === "TOMORROW" ? " (завтра)" : "";
       await sendMessage(
         order.adminChatId,
-        `✅ Мастер ${order.masterName} взял заявку #${order.id}.`,
+        `✅ Мастер ${order.masterName} взял заявку #${order.id}${dayLabel}.`,
         { reply_markup: adminMenuReplyKeyboard() }
       );
     }
@@ -1190,7 +1226,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
-    const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства / серийного номера" };
+    const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства / серийного номера", DUT: "датчика DUT" };
     const label = labels[photoType] || "фото";
 
      // #region agent log
@@ -1237,6 +1273,9 @@ async function onCallback(cb) {
     } else if (skipType === "DEVICE") {
       order.deviceSkipped = true;
       skipLabel = "устройства";
+    } else if (skipType === "DUT") {
+      order.dutSkipped = true;
+      skipLabel = "фото DUT";
     }
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
@@ -1251,10 +1290,15 @@ async function onCallback(cb) {
     }
 
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
-    await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены. Нажмите «✅ Выполнено» для завершения.`);
-    await sendMessage(chatId, "Нажмите кнопку ниже:", {
-      reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] },
-    });
+    await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены.`);
+    await sendMessage(
+      chatId,
+      `<b>ПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] },
+      }
+    );
     return;
   }
 
@@ -1275,7 +1319,13 @@ async function onCallback(cb) {
       adminChatId,
       `✅ Заявка #${order.id} выполнена.\n` +
         `👷 Мастер: ${order.masterName}\n` +
-        `🚗/🏢: ${logisticsLabel(order)}`
+        `🚗/🏢: ${logisticsLabel(order)}\n\n` +
+        `Нажмите кнопку ниже, чтобы закрыть заявку официально.`,
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: "🔒 Закрыть заявку", callback_data: `ADMIN_CLOSE:${order.id}` }]],
+        },
+      }
     );
     if (order.carNumberPhotoId) {
       await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
@@ -1291,6 +1341,48 @@ async function onCallback(cb) {
       await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
     } else if (order.deviceSkipped) {
       await sendMessage(adminChatId, "🔌 Устройство: не приложено (мастер выбрал «Без устройства»)");
+    }
+    if (order.dutPhotoId) {
+      await sendPhoto(adminChatId, order.dutPhotoId, "📷 Датчик DUT");
+    } else if (order.dutSkipped) {
+      await sendMessage(adminChatId, "📡 DUT: фото не приложено (мастер выбрал «Без фото DUT»)");
+    }
+    // Копия уведомления супер-админу (если закрыл не он)
+    if (adminChatId !== SUPER_ADMIN_ID) {
+      await sendMessage(
+        SUPER_ADMIN_ID,
+        `✅ Заявка #${order.id} выполнена мастером ${order.masterName}. Ждём закрытия администратором.`
+      );
+    }
+    return;
+  }
+
+  // ADMIN: закрытие заявки после выполнения мастером
+  if (data.startsWith("ADMIN_CLOSE:")) {
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order) {
+      await sendMessage(chatId, "⚠️ Заявка не найдена.");
+      return;
+    }
+    if (order.status === "CLOSED") {
+      await editMessage(chatId, messageId, `🔒 Заявка #${order.id} уже закрыта.`, { reply_markup: { inline_keyboard: [] } });
+      return;
+    }
+    order.status = "CLOSED";
+    order.closedAt = new Date().toISOString();
+    await editMessage(
+      chatId, messageId,
+      `🔒 Заявка #${order.id} закрыта.\n👷 Мастер: ${order.masterName}\n📞 Клиент: ${order.phone}`,
+      { reply_markup: { inline_keyboard: [] } }
+    );
+    // Уведомить мастера
+    if (order.masterTgId) {
+      await sendMessage(order.masterTgId, `🔒 Заявка #${order.id} официально закрыта администратором.`);
+    }
+    // Уведомить супер-админа если закрыл не он
+    if (chatId !== SUPER_ADMIN_ID) {
+      await sendMessage(SUPER_ADMIN_ID, `🔒 Заявка #${order.id} закрыта администратором.`);
     }
     return;
   }
@@ -1340,6 +1432,12 @@ async function onCallback(cb) {
       carNumberSkipped: false,
       odometerSkipped: false,
       deviceSkipped: false,
+
+      dutPhotoId: null,
+      dutSkipped: false,
+
+      options: [],
+      acceptPlannedDayAt: null,
 
       status: "NEW",
     };
@@ -1474,7 +1572,7 @@ async function onCallback(cb) {
     return;
   }
 
-  // ✅ FIX: ADMIN: picked option (берём индекс, а не текст)
+  // ADMIN: toggle option (мульти-выбор устройств)
   if (data.startsWith("ADMIN_OPT:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_OPTION") {
@@ -1493,42 +1591,60 @@ async function onCallback(cb) {
       return;
     }
 
-    const option = OPTIONS[optIndex];
-
-    // #region agent log
-    fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'X-Debug-Session-Id':'0e7f15'
-      },
-      body:JSON.stringify({
-        sessionId:'0e7f15',
-        runId:'pre-fix',
-        hypothesisId:'H1',
-        location:'server.js:ADMIN_OPT',
-        message:'Admin picked device option',
-        data:{ orderId, optIndex, option },
-        timestamp:Date.now()
-      })
-    }).catch(()=>{});
-    // #endregion agent log
-    if (!option) {
-      await sendMessage(chatId, "⚠️ Опция не найдена. Проверь массив OPTIONS.", { reply_markup: adminMenuReplyKeyboard() });
+    if (optIndex < 0 || optIndex >= OPTIONS.length) {
+      await sendMessage(chatId, "⚠️ Опция не найдена.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
-    order.option = option;
+    const selectedOpts = st.data.selectedOpts ? [...st.data.selectedOpts] : [];
+    const idx = selectedOpts.indexOf(optIndex);
+    if (idx === -1) selectedOpts.push(optIndex);
+    else selectedOpts.splice(idx, 1);
 
-    // после выбора опции — ВСЕГДА комментарий админа
+    setState(chatId, "ADMIN_WAIT_OPTION", { orderId, selectedOpts });
+
+    const chosen = selectedOpts.map(i => OPTIONS[i]).join(", ") || "ничего не выбрано";
+    await editMessage(
+      chatId, messageId,
+      `🛠 Монтаж\n\nВыберите устройства (можно несколько):\n\nВыбрано: ${chosen}`,
+      { reply_markup: optionsKeyboard(orderId, selectedOpts) }
+    );
+    return;
+  }
+
+  // ADMIN: подтверждение выбора устройств
+  if (data.startsWith("ADMIN_OPT_CONFIRM:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_OPTION") {
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+
+    const selectedOpts = st.data.selectedOpts || [];
+    if (selectedOpts.length === 0) {
+      await answerCb(cb.id, "⚠️ Выберите хотя бы одно устройство");
+      return;
+    }
+
+    order.options = selectedOpts.map(i => OPTIONS[i]);
+    order.option = order.options[0]; // backward compat
+
     setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
 
     const hint =
       "✍️ Напишите комментарий.\n" +
-      "Например: «2 устройства: FMB920 + FMB125, поставить реле, SIM клиента, серийники позже»\n" +
+      "Например: «поставить реле, SIM клиента, серийники позже»\n" +
       "или «Другая модель: …»";
 
-    await editMessage(chatId, messageId, `✅ Опция выбрана: ${order.option}\n\n${hint}`, {
+    await editMessage(chatId, messageId, `✅ Выбрано: ${order.options.join(", ")}\n\n${hint}`, {
       reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
     });
     return;
@@ -1824,7 +1940,7 @@ function buildExcelReport(from, to, opts = {}) {
       dEnd ? formatDateInTz(dEnd) : "",
       dEnd ? formatTimeInTz(dEnd) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
-      o.type === "INSTALL" ? (o.option || "—") : "—",
+      o.type === "INSTALL" ? ((o.options && o.options.length ? o.options.join(", ") : o.option) || "—") : "—",
       o.city || "—",
       o.masterName || "—",
       o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
@@ -1840,12 +1956,14 @@ function buildExcelReport(from, to, opts = {}) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Заявки");
 
-  // Сводка по видам монтажа (только заявки INSTALL)
+  // Сводка по видам монтажа (только заявки INSTALL, каждое устройство считается отдельно)
   const installs = items.filter((o) => o.type === "INSTALL");
   const byOption = {};
   for (const o of installs) {
-    const opt = o.option || "—";
-    byOption[opt] = (byOption[opt] || 0) + 1;
+    const opts = o.options && o.options.length ? o.options : (o.option ? [o.option] : ["—"]);
+    for (const opt of opts) {
+      byOption[opt] = (byOption[opt] || 0) + 1;
+    }
   }
   const optionRows = [["Вид монтажа", "Количество"]];
   Object.entries(byOption).forEach(([opt, cnt]) => {
@@ -1919,7 +2037,7 @@ function buildExcelReportPending(opts = {}) {
       dEnd ? formatDateInTz(dEnd) : "",
       dEnd ? formatTimeInTz(dEnd) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
-      o.type === "INSTALL" ? (o.option || "—") : "—",
+      o.type === "INSTALL" ? ((o.options && o.options.length ? o.options.join(", ") : o.option) || "—") : "—",
       o.city || "—",
       o.masterName || "—",
       o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
@@ -1938,8 +2056,10 @@ function buildExcelReportPending(opts = {}) {
   const installs = items.filter((o) => o.type === "INSTALL");
   const byOption = {};
   for (const o of installs) {
-    const opt = o.option || "—";
-    byOption[opt] = (byOption[opt] || 0) + 1;
+    const opts = o.options && o.options.length ? o.options : (o.option ? [o.option] : ["—"]);
+    for (const opt of opts) {
+      byOption[opt] = (byOption[opt] || 0) + 1;
+    }
   }
   const optionRows = [["Вид монтажа", "Количество"]];
   Object.entries(byOption).forEach(([opt, cnt]) => optionRows.push([opt, cnt]));
