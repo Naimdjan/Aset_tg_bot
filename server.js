@@ -75,9 +75,9 @@ function getPhotoSlots(order) {
 
   const addUnitSlots = (name, unitIdx, hasDut) => {
     const n = unitIdx + 1;
-    slots.push({ key: `${name}_${unitIdx}_device`,   label: `${name}-${n}`,    deviceName: name, photoType: "device",   unitIdx, required: true  });
+    slots.push({ key: `${name}_${unitIdx}_device`,   label: `${name}-${n}`,         deviceName: name, photoType: "device",   unitIdx, required: true  });
     if (hasDut) {
-      slots.push({ key: `${name}_${unitIdx}_dut`,    label: `DUT-${n}`,        deviceName: name, photoType: "dut",      unitIdx, required: true  });
+      slots.push({ key: `${name}_${unitIdx}_dut`,    label: `DUT-${n}|${name}-${n}`, deviceName: name, photoType: "dut",      unitIdx, required: true  });
     }
     slots.push({ key: `${name}_${unitIdx}_odometer`, label: `Пробег ${name}-${n}`, deviceName: name, photoType: "odometer", unitIdx, required: false });
     slots.push({ key: `${name}_${unitIdx}_plate`,    label: `Номер ${name}-${n}`,  deviceName: name, photoType: "plate",    unitIdx, required: false });
@@ -449,11 +449,12 @@ function masterArrivalPhotoKeyboard(orderId, order) {
       ]);
       i += 2;
     } else {
-      const row = [{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
+      // Фото — полная ширина строки
+      rows.push([{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }]);
+      // «Без» — отдельная строка, чтобы кнопка фото не обрезалась
       if (!slot.required) {
-        row.push({ text: "⏭ Без", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
+        rows.push([{ text: "⏭ Без", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` }]);
       }
-      rows.push(row);
       i++;
     }
   }
@@ -545,7 +546,7 @@ function masterCalendarKeyboard(orderId, yyyymm) {
 
 function masterHourKeyboard(orderId, yyyymmdd) {
   const hours = [];
-  for (let h = 5; h <= 21; h++) hours.push(h);
+  for (let h = 5; h <= 24; h++) hours.push(h);
   const rows = [];
   for (let i = 0; i < hours.length; i += 4) {
     rows.push(
@@ -556,6 +557,60 @@ function masterHourKeyboard(orderId, yyyymmdd) {
     );
   }
   rows.push([{ text: "⬅ Дата", callback_data: `MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
+}
+
+// Клавиатура выбора даты для предложения времени администратором
+function adminProposeCalendarKeyboard(orderId, yyyymm) {
+  const parsed = parseYyyymm(yyyymm);
+  const now = new Date();
+  const year = parsed?.y || now.getFullYear();
+  const month = parsed?.mo || now.getMonth() + 1;
+  const first = new Date(year, month - 1, 1);
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const dow = (first.getDay() + 6) % 7;
+  const prevMonth = new Date(year, month - 2, 1);
+  const nextMonth = new Date(year, month, 1);
+  const prevYm = formatYyyymm(prevMonth.getFullYear(), prevMonth.getMonth() + 1);
+  const nextYm = formatYyyymm(nextMonth.getFullYear(), nextMonth.getMonth() + 1);
+  const rows = [];
+  rows.push([
+    { text: "‹", callback_data: `APROP_MN:${orderId}:${prevYm}` },
+    { text: monthLabelShort(year, month), callback_data: "NOOP" },
+    { text: "›", callback_data: `APROP_MN:${orderId}:${nextYm}` },
+  ]);
+  let day = 1;
+  for (let week = 0; week < 6; week++) {
+    const row = [];
+    for (let i = 0; i < 7; i++) {
+      if (week === 0 && i < dow) { row.push({ text: "·", callback_data: "NOOP" }); continue; }
+      if (day > daysInMonth) { row.push({ text: "·", callback_data: "NOOP" }); continue; }
+      const yyyymmdd = `${year}${pad2(month)}${pad2(day)}`;
+      row.push({ text: String(day), callback_data: `APROP_MD:${orderId}:${yyyymmdd}` });
+      day++;
+    }
+    rows.push(row);
+    if (day > daysInMonth) break;
+  }
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
+}
+
+// Клавиатура выбора часа для предложения времени администратором
+function adminProposeHourKeyboard(orderId, yyyymmdd) {
+  const hours = [];
+  for (let h = 5; h <= 24; h++) hours.push(h);
+  const rows = [];
+  for (let i = 0; i < hours.length; i += 4) {
+    rows.push(
+      hours.slice(i, i + 4).map((h) => ({
+        text: `${pad2(h)}:00`,
+        callback_data: `APROP_MH:${orderId}:${yyyymmdd}:${pad2(h)}`,
+      }))
+    );
+  }
+  rows.push([{ text: "⬅ Дата", callback_data: `APROP_MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
 }
@@ -601,12 +656,13 @@ function adminCommentKeyboard(orderId) {
   };
 }
 
-// Клавиатура выбора количества устройства (1-10)
+// Клавиатура выбора количества устройства (1-10 + ввод вручную)
 function qtyKeyboard(orderId) {
   return {
     inline_keyboard: [
       [1, 2, 3, 4, 5].map(n => ({ text: String(n), callback_data: `ADMIN_QTY:${orderId}:${n}` })),
       [6, 7, 8, 9, 10].map(n => ({ text: String(n), callback_data: `ADMIN_QTY:${orderId}:${n}` })),
+      [{ text: "✏️ Больше...", callback_data: `ADMIN_QTY_CUSTOM:${orderId}` }],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
   };
@@ -843,6 +899,40 @@ async function onMessage(message) {
       `🛠 Монтаж\n🚗 Выезд к клиенту\n📍 Адрес: ${order.address}\n\nВыберите опцию:`,
       { reply_markup: optionsKeyboard(orderId) }
     );
+    return;
+  }
+
+  // ADMIN: ждём ввод произвольного количества устройства
+  if (st.step === "ADMIN_WAIT_QTY_CUSTOM") {
+    const { orderId, qtyIdx, quantities } = st.data;
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+    const qty = parseInt(text, 10);
+    if (!qty || qty < 1 || qty > 999) {
+      await sendMessage(chatId, "⚠️ Введите число от 1 до 999:");
+      return;
+    }
+    const deviceName = order.options[qtyIdx];
+    quantities[deviceName] = qty;
+    const nextIdx = qtyIdx + 1;
+    if (nextIdx < order.options.length) {
+      setState(chatId, "ADMIN_WAIT_QTY", { orderId, qtyIdx: nextIdx, quantities });
+      await sendMessage(chatId, `✅ ${deviceName}: ${qty} шт.\n\n🔢 Сколько ${order.options[nextIdx]}?`, {
+        reply_markup: qtyKeyboard(orderId),
+      });
+      return;
+    }
+    order.deviceQuantities = { ...quantities };
+    order.totalDevices = Object.values(quantities).reduce((a, b) => a + b, 0);
+    const qtyText = order.options.map(o => `${o} × ${quantities[o]}`).join(", ");
+    setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
+    await sendMessage(chatId, `✅ ${deviceName}: ${qty} шт.\n✅ Устройства: ${qtyText}\n\n✍️ Напишите комментарий:`, {
+      reply_markup: adminCommentKeyboard(orderId),
+    });
     return;
   }
 
@@ -1294,14 +1384,16 @@ async function onCallback(cb) {
     });
 
     if (order.adminChatId) {
+      const now2 = new Date();
+      const yyyymm2 = formatYyyymm(now2.getFullYear(), now2.getMonth() + 1);
       await sendMessage(
         order.adminChatId,
-        `🕒 Мастер ${order.masterName} предложил время для заявки #${order.id}:\n` +
-          `⏰ ${order.masterSuggestedTimeText}\n\nПодтвердить?`,
+        `🕒 Мастер ${order.masterName} предложил время для заявки #${order.id}:\n⏰ ${order.masterSuggestedTimeText}\n\nПодтвердить?`,
         {
           reply_markup: {
             inline_keyboard: [
               [{ text: "✅ Подтвердить время", callback_data: `ADMIN_CONFIRM_TIME:${order.id}` }],
+              [{ text: "🕒 Предложить другое", callback_data: `ADMIN_PROPOSE_TIME:${order.id}:${yyyymm2}` }],
               [{ text: "❌ Отмена", callback_data: "CANCEL" }],
             ],
           },
@@ -1403,6 +1495,128 @@ async function onCallback(cb) {
       }
     );
 
+    return;
+  }
+
+  // ADMIN: предлагает другое время (показ календаря)
+  if (data.startsWith("ADMIN_PROPOSE_TIME:")) {
+    const parts = data.split(":");
+    const orderId = parts[1];
+    const yyyymm = parts[2] || formatYyyymm(new Date().getFullYear(), new Date().getMonth() + 1);
+    const order = orders.get(orderId);
+    if (!order) { await sendMessage(chatId, "⚠️ Заявка не найдена."); return; }
+    setState(chatId, "ADMIN_PROPOSE_DATE", { orderId, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату для предложения мастеру:", {
+      reply_markup: adminProposeCalendarKeyboard(orderId, yyyymm),
+    });
+    return;
+  }
+
+  // ADMIN: навигация по календарю при предложении времени
+  if (data.startsWith("APROP_MN:")) {
+    const [, orderId, yyyymm] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order) return;
+    setState(chatId, "ADMIN_PROPOSE_DATE", { orderId, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату:", {
+      reply_markup: adminProposeCalendarKeyboard(orderId, yyyymm),
+    });
+    return;
+  }
+
+  // ADMIN: выбрал дату
+  if (data.startsWith("APROP_MD:")) {
+    const [, orderId, yyyymmdd] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order) return;
+    setState(chatId, "ADMIN_PROPOSE_HOUR", { orderId, yyyymmdd });
+    await editMessage(chatId, messageId, "🕒 Выберите час:", {
+      reply_markup: adminProposeHourKeyboard(orderId, yyyymmdd),
+    });
+    return;
+  }
+
+  // ADMIN: назад к дате (из выбора часа)
+  if (data.startsWith("APROP_MB:")) {
+    const [, orderId, yyyymm] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order) return;
+    setState(chatId, "ADMIN_PROPOSE_DATE", { orderId, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату:", {
+      reply_markup: adminProposeCalendarKeyboard(orderId, yyyymm),
+    });
+    return;
+  }
+
+  // ADMIN: выбрал час — отправляет предложение мастеру
+  if (data.startsWith("APROP_MH:")) {
+    const [, orderId, yyyymmdd, hh] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order) return;
+    const d = parseYyyymmdd(yyyymmdd);
+    if (!d) return;
+    const timeText = `${pad2(d.d)}.${pad2(d.mo)}.${d.y} ${hh}:00`;
+    order.adminSuggestedTimeText = timeText;
+    order.status = "WAIT_MASTER_CONFIRM_TIME";
+    clearState(chatId);
+    await editMessage(chatId, messageId, `✅ Вы предложили время: ${timeText}\nОтправлено мастеру на подтверждение.`);
+    await sendMessage(
+      order.masterTgId,
+      `⏰ Администратор предлагает время для заявки #${order.id}:\n<b>${timeText}</b>\n\nПримите или предложите своё:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "✅ Принять", callback_data: `MASTER_ACCEPT_TIME:${order.id}` }],
+            [{ text: "🕒 Предложить своё", callback_data: `MASTER_RESUGGEST_TIME:${order.id}` }],
+          ],
+        },
+      }
+    );
+    await sendMessage(chatId, "Ожидаем ответа мастера.", { reply_markup: adminMenuReplyKeyboard() });
+    return;
+  }
+
+  // MASTER: принимает время предложенное админом
+  if (data.startsWith("MASTER_ACCEPT_TIME:")) {
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    order.confirmedTimeText = order.adminSuggestedTimeText || "";
+    order.status = "TIME_CONFIRMED";
+    await editMessage(chatId, messageId, `✅ Время принято: ${order.confirmedTimeText}`);
+    const isVisit = order.logistics === "VISIT";
+    const arrivalBtnText = isVisit ? "🚗 Я у клиента" : "🚗 Клиент приехал";
+    const arrivalPrompt = isVisit ? "Когда прибудете к клиенту, нажмите кнопку ниже:" : "Когда клиент приедет, нажмите кнопку ниже:";
+    const commentPart = order.adminComment ? `\n\n<b>💬 Комментарий: ${order.adminComment}</b>` : "";
+    await sendMessage(
+      chatId,
+      `✅ Время для заявки #${order.id}: ${order.confirmedTimeText}${commentPart}\n\n${arrivalPrompt}`,
+      {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [[{ text: arrivalBtnText, callback_data: `MASTER_CLIENT_ARRIVED:${order.id}` }]] },
+      }
+    );
+    if (order.adminChatId) {
+      await safeSend(order.adminChatId, `✅ Мастер ${order.masterName} принял время для заявки #${order.id}: ${order.confirmedTimeText}`);
+    }
+    if (String(order.adminChatId) !== String(SUPER_ADMIN_ID)) {
+      await safeSend(SUPER_ADMIN_ID, `✅ Мастер ${order.masterName} принял время для заявки #${order.id}: ${order.confirmedTimeText}`);
+    }
+    return;
+  }
+
+  // MASTER: предлагает своё время в ответ на предложение админа (возвращаем к выбору даты)
+  if (data.startsWith("MASTER_RESUGGEST_TIME:")) {
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    const now = new Date();
+    const yyyymm = formatYyyymm(now.getFullYear(), now.getMonth() + 1);
+    setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату для предложения:", {
+      reply_markup: masterCalendarKeyboard(orderId, yyyymm),
+    });
     return;
   }
 
@@ -1520,10 +1734,12 @@ async function onCallback(cb) {
 
     const adminChatId = order.adminChatId || SUPER_ADMIN_ID;
     const doneCloseKb = { inline_keyboard: [[{ text: "🔒 Закрыть заявку", callback_data: `ADMIN_CLOSE:${order.id}` }]] };
+    const doneDeviceLine = order.type === "INSTALL" ? `\n📦 Установлено: ${optionsLabel(order)}` : "";
     const doneMsg =
       `✅ Заявка #${order.id} выполнена.\n` +
       `👷 Мастер: ${order.masterName}\n` +
-      `🚗/🏢: ${logisticsLabel(order)}`;
+      `🚗/🏢: ${logisticsLabel(order)}` +
+      doneDeviceLine;
     // 1. Уведомление о завершении (без кнопки закрытия)
     await sendMessage(adminChatId, doneMsg);
     // 2. Только обязательные фото, которые не были предоставлены
@@ -1568,9 +1784,10 @@ async function onCallback(cb) {
     order.status = "CLOSED";
     order.closedAt = new Date().toISOString();
     order.closedBy = chatId;
+    const closedDeviceLine = order.type === "INSTALL" ? `\n📦 Установлено: ${optionsLabel(order)}` : "";
     await editMessage(
       chatId, messageId,
-      `🔒 Заявка #${order.id} закрыта.\n👷 Мастер: ${order.masterName}\n📞 Клиент: ${order.phone}`,
+      `🔒 Заявка #${order.id} закрыта.\n👷 Мастер: ${order.masterName}\n📞 Клиент: ${order.phone}${closedDeviceLine}`,
       { reply_markup: { inline_keyboard: [] } }
     );
     // Уведомить мастера
@@ -1620,6 +1837,7 @@ async function onCallback(cb) {
       adminComment: "",
 
       masterSuggestedTimeText: "",
+      adminSuggestedTimeText: "",
       confirmedTimeText: "",
       actualArrivalAt: null,
 
@@ -1835,6 +2053,26 @@ async function onCallback(cb) {
       `✅ Выбрано: ${order.options.join(", ")}\n\n🔢 Сколько ${order.options[0]}?`,
       { reply_markup: qtyKeyboard(orderId) }
     );
+    return;
+  }
+
+  // ADMIN: нажал «✏️ Больше...» — ждём ввод числа текстом
+  if (data.startsWith("ADMIN_QTY_CUSTOM:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_QTY") {
+      await sendMessage(chatId, "⚠️ Сессия устарела.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+    const deviceName = order.options[st.data.qtyIdx];
+    setState(chatId, "ADMIN_WAIT_QTY_CUSTOM", { orderId, qtyIdx: st.data.qtyIdx, quantities: st.data.quantities || {} });
+    await editMessage(chatId, messageId, `✏️ Введите количество для ${deviceName} (число от 1 до 999):`);
     return;
   }
 
