@@ -987,11 +987,16 @@ async function onMessage(message) {
     const photoLabel = slot ? slot.label : photoType;
 
     // Пересылаем фото администратору
-    safeSend(adminChatIdImm, `📷 Мастер ${order.masterName || ""}: ${photoLabel} (#${order.id})`);
-    await sendPhoto(adminChatIdImm, fileId, `📷 ${photoLabel} — заявка #${order.id}`).catch(() => {});
+    const photoDate = order.createdAt ? formatDate(new Date(order.createdAt)) : "—";
+    const photoCaption =
+      `📷 ${photoLabel}\n` +
+      `📋 Заявка #${order.id}\n` +
+      `📅 Дата: ${photoDate}\n` +
+      `📞 Клиент: ${order.phone || "—"}\n` +
+      `👷 Мастер: ${order.masterName || "—"}`;
+    await sendPhoto(adminChatIdImm, fileId, photoCaption).catch(() => {});
     if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) {
-      safeSend(SUPER_ADMIN_ID, `📷 Мастер ${order.masterName || ""}: фото "${photoLabel}" (#${order.id})`);
-      sendPhoto(SUPER_ADMIN_ID, fileId, `📷 ${photoLabel} — заявка #${order.id}`).catch(() => {});
+      sendPhoto(SUPER_ADMIN_ID, fileId, photoCaption).catch(() => {});
     }
 
     clearState(chatId);
