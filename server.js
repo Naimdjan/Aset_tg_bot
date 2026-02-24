@@ -1,5 +1,9 @@
 const express = require("express");
 const axios = require("axios");
+const XLSX = require("xlsx");
+const path = require("path");
+const os = require("os");
+const fs = require("fs");
 
 const app = express();
 app.use(express.json());
@@ -83,12 +87,26 @@ async function sendPhoto(chatId, fileId, caption) {
   return tg("sendPhoto", { chat_id: chatId, photo: fileId, caption });
 }
 
+async function sendDocument(chatId, filePath, caption) {
+  const FormData = require("form-data");
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("document", fs.createReadStream(filePath));
+  if (caption) form.append("caption", caption);
+  return axios.post(`${TELEGRAM_API}/sendDocument`, form, {
+    headers: form.getHeaders(),
+    timeout: 30000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+}
+
 // =============================
 // UI builders
 // =============================
 
 // ✅ Главное меню — Reply Keyboard (кнопки прямо в строке ввода, без /start)
-function mainMenuReplyKeyboard() {
+function adminMenuReplyKeyboard() {
   return {
     keyboard: [
       [{ text: "📝 Новая заявка (монтаж)" }, { text: "🧰 Ремонт / другое" }],
@@ -99,6 +117,26 @@ function mainMenuReplyKeyboard() {
     one_time_keyboard: false,
     selective: false,
   };
+}
+
+function masterMenuReplyKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "📊 Отчёт" }],
+      [{ text: "🆔 Мой ID" }, { text: "❌ Отмена" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    selective: false,
+  };
+}
+
+function isMasterChat(chatId) {
+  return MASTERS.some((m) => String(m.tgId) === String(chatId));
+}
+
+function menuKeyboardForChat(chatId) {
+  return isMasterChat(chatId) ? masterMenuReplyKeyboard() : adminMenuReplyKeyboard();
 }
 
 // Inline keyboards (для выбора)
@@ -155,6 +193,139 @@ function masterOrderKeyboard(orderId) {
   };
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function formatYyyymm(y, m) {
+  return `${y}${pad2(m)}`; // m: 1..12
+}
+
+function parseYyyymm(yyyymm) {
+  const m = String(yyyymm).match(/^(\d{4})(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  if (!y || mo < 1 || mo > 12) return null;
+  return { y, mo };
+}
+
+function parseYyyymmdd(yyyymmdd) {
+  const m = String(yyyymmdd).match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return { y, mo, d };
+}
+
+function monthLabelRu(y, mo) {
+  const months = [
+    "Январь",
+    "Февраль",
+    "Март",
+    "Апрель",
+    "Май",
+    "Июнь",
+    "Июль",
+    "Август",
+    "Сентябрь",
+    "Октябрь",
+    "Ноябрь",
+    "Декабрь",
+  ];
+  return `${months[mo - 1]} ${y}`;
+}
+
+// Календарь для выбора даты визита мастером
+function masterCalendarKeyboard(orderId, yyyymm) {
+  const parsed = parseYyyymm(yyyymm);
+  const y = parsed?.y;
+  const mo = parsed?.mo;
+  const now = new Date();
+  const year = y || now.getFullYear();
+  const month = mo || now.getMonth() + 1;
+
+  const first = new Date(year, month - 1, 1);
+  const daysInMonth = new Date(year, month, 0).getDate();
+  // Monday-based index: 0..6 (Mon..Sun)
+  const jsDow = first.getDay(); // 0 Sun .. 6 Sat
+  const dow = (jsDow + 6) % 7;
+
+  const prevMonth = new Date(year, month - 2, 1);
+  const nextMonth = new Date(year, month, 1);
+  const prevYyyymm = formatYyyymm(prevMonth.getFullYear(), prevMonth.getMonth() + 1);
+  const nextYyyymm = formatYyyymm(nextMonth.getFullYear(), nextMonth.getMonth() + 1);
+
+  const rows = [];
+  rows.push([
+    { text: "«", callback_data: `MN:${orderId}:${prevYyyymm}` },
+    { text: monthLabelRu(year, month), callback_data: "NOOP" },
+    { text: "»", callback_data: `MN:${orderId}:${nextYyyymm}` },
+  ]);
+
+  rows.push([
+    { text: "Пн", callback_data: "NOOP" },
+    { text: "Вт", callback_data: "NOOP" },
+    { text: "Ср", callback_data: "NOOP" },
+    { text: "Чт", callback_data: "NOOP" },
+    { text: "Пт", callback_data: "NOOP" },
+    { text: "Сб", callback_data: "NOOP" },
+    { text: "Вс", callback_data: "NOOP" },
+  ]);
+
+  let day = 1;
+  for (let week = 0; week < 6; week++) {
+    const row = [];
+    for (let i = 0; i < 7; i++) {
+      if (week === 0 && i < dow) {
+        row.push({ text: " ", callback_data: "NOOP" });
+        continue;
+      }
+      if (day > daysInMonth) {
+        row.push({ text: " ", callback_data: "NOOP" });
+        continue;
+      }
+      const yyyymmdd = `${year}${pad2(month)}${pad2(day)}`;
+      row.push({ text: String(day), callback_data: `MD:${orderId}:${yyyymmdd}` });
+      day++;
+    }
+    rows.push(row);
+    if (day > daysInMonth) break;
+  }
+
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
+}
+
+function masterHourKeyboard(orderId, yyyymmdd) {
+  const hours = [];
+  for (let h = 8; h <= 20; h++) hours.push(h);
+  const rows = [];
+  for (let i = 0; i < hours.length; i += 4) {
+    rows.push(
+      hours.slice(i, i + 4).map((h) => ({
+        text: `${pad2(h)}:00`,
+        callback_data: `MH:${orderId}:${yyyymmdd}:${pad2(h)}`,
+      }))
+    );
+  }
+  rows.push([{ text: "⬅️ Назад к дате", callback_data: `MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
+}
+
+function masterMinuteKeyboard(orderId, yyyymmdd, hh) {
+  const mins = ["00", "15", "30", "45"];
+  const rows = [
+    mins.map((mm) => ({ text: mm, callback_data: `MM:${orderId}:${yyyymmdd}:${hh}:${mm}` })),
+    [{ text: "⬅️ Назад к часам", callback_data: `MBH:${orderId}:${yyyymmdd}` }],
+    [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+  ];
+  return { inline_keyboard: rows };
+}
+
 // ✅ FIX: передаём индекс опции, а не текст (чтобы работали FMB140+Temp. и т.п.)
 function optionsKeyboard(orderId) {
   const rows = [];
@@ -206,12 +377,12 @@ async function onMessage(message) {
 
   // Команды оставим, но меню выдаём без /start
   if (text === "/start") {
-    await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: menuKeyboardForChat(chatId) });
     return;
   }
   if (text === "/getmyid") {
     await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`, {
-      reply_markup: mainMenuReplyKeyboard(),
+      reply_markup: menuKeyboardForChat(chatId),
     });
     return;
   }
@@ -219,19 +390,19 @@ async function onMessage(message) {
   // Кнопки (Reply Keyboard) — работают как обычный текст
   if (text === "🆔 Мой ID") {
     await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`, {
-      reply_markup: mainMenuReplyKeyboard(),
+      reply_markup: menuKeyboardForChat(chatId),
     });
     return;
   }
 
   if (text === "❌ Отмена") {
     clearState(chatId);
-    await sendMessage(chatId, "❌ Отменено.", { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, "❌ Отменено.", { reply_markup: menuKeyboardForChat(chatId) });
     return;
   }
 
   if (text === "📊 Отчёт") {
-    const isMaster = MASTERS.some((m) => String(m.tgId) === String(chatId));
+    const isMaster = isMasterChat(chatId);
     const scope = isMaster ? "MASTER" : "ADMIN";
     const masterTgId = isMaster ? chatId : null;
 
@@ -244,13 +415,13 @@ async function onMessage(message) {
 
   if (text === "📝 Новая заявка (монтаж)") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "INSTALL" });
-    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
     return;
   }
 
   if (text === "🧰 Ремонт / другое") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "REPAIR" });
-    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
     return;
   }
 
@@ -258,7 +429,7 @@ async function onMessage(message) {
   const st = getState(chatId);
   if (!st) {
     // Если человек написал что-то без процесса — просто покажем меню
-    await sendMessage(chatId, "Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, "Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
     return;
   }
 
@@ -267,7 +438,7 @@ async function onMessage(message) {
     st.data.phone = text;
     setState(chatId, "ADMIN_WAIT_MASTER", st.data);
     await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", {
-      reply_markup: mainMenuReplyKeyboard(),
+      reply_markup: adminMenuReplyKeyboard(),
     });
     await sendMessage(chatId, "Список мастеров:", { reply_markup: mastersKeyboard() });
     return;
@@ -279,7 +450,7 @@ async function onMessage(message) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -291,7 +462,7 @@ async function onMessage(message) {
       await sendMessage(
         chatId,
         `🧰 Ремонт / другое\n🚗 Выезд к клиенту\n📍 Адрес: ${order.address}\n\n✍️ Напишите комментарий (что сломано / что нужно сделать):`,
-        { reply_markup: mainMenuReplyKeyboard() }
+        { reply_markup: adminMenuReplyKeyboard() }
       );
       return;
     }
@@ -311,7 +482,7 @@ async function onMessage(message) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -324,53 +495,11 @@ async function onMessage(message) {
     await sendOrderToMaster(order);
 
     // подтверждение админу
-    await sendMessage(chatId, formatAdminConfirm(order), { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, formatAdminConfirm(order), { reply_markup: adminMenuReplyKeyboard() });
     return;
   }
 
-  // MASTER: ждём время, когда клиент может подойти
-  if (st.step === "MASTER_WAIT_TIME") {
-    const orderId = st.data.orderId;
-    const order = orders.get(orderId);
-    if (!order || order.masterTgId !== chatId) {
-      clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена или принадлежит другому мастеру.", {
-        reply_markup: mainMenuReplyKeyboard(),
-      });
-      return;
-    }
-
-    order.masterSuggestedTimeText = text;
-    order.status = "WAIT_ADMIN_CONFIRM_TIME";
-
-    clearState(chatId);
-
-    // Уведомление администратору
-    if (order.adminChatId) {
-      await sendMessage(
-        order.adminChatId,
-        `🕒 Мастер ${order.masterName} предложил время для заявки #${order.id}:\n` +
-          `⏰ ${order.masterSuggestedTimeText}\n\nПодтвердить?`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "✅ Подтвердить время", callback_data: `ADMIN_CONFIRM_TIME:${order.id}` },
-              ],
-              [{ text: "❌ Отмена", callback_data: "CANCEL" }],
-            ],
-          },
-        }
-      );
-    }
-
-    await sendMessage(
-      chatId,
-      "✅ Время отправлено администратору на подтверждение.",
-      { reply_markup: mainMenuReplyKeyboard() }
-    );
-    return;
-  }
+  // MASTER: выбор времени делается через календарь/часы (см. callback-обработчики MN/MD/MH/MM)
 
   // MASTER: отправка фото номера машины, пробега и устройства
   if (
@@ -383,7 +512,7 @@ async function onMessage(message) {
     if (!order || order.masterTgId !== chatId) {
       clearState(chatId);
       await sendMessage(chatId, "⚠️ Заявка не найдена или принадлежит другому мастеру.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -391,7 +520,7 @@ async function onMessage(message) {
     const photos = message.photo || [];
     if (!photos.length) {
       await sendMessage(chatId, "⚠️ Пожалуйста, отправьте именно фото.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -402,7 +531,7 @@ async function onMessage(message) {
       order.carNumberPhotoId = fileId;
       setState(chatId, "MASTER_WAIT_PHOTO_ODOMETER", { orderId });
       await sendMessage(chatId, "📸 Теперь отправьте фото пробега спидометра.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -411,7 +540,7 @@ async function onMessage(message) {
       order.odometerPhotoId = fileId;
       setState(chatId, "MASTER_WAIT_PHOTO_DEVICE", { orderId });
       await sendMessage(chatId, "📸 Теперь отправьте фото устройства / серийного номера.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -423,7 +552,7 @@ async function onMessage(message) {
       clearState(chatId);
 
       await sendMessage(chatId, `✅ Данные по заявке #${order.id} сохранены.`, {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
 
       // Уведомление администратору + пересылка фото
@@ -458,7 +587,7 @@ async function onMessage(message) {
       await sendMessage(
         chatId,
         "⚠️ Неверный формат периода.\nВведите в виде: 01.03.2026-31.03.2026",
-        { reply_markup: mainMenuReplyKeyboard() }
+        { reply_markup: menuKeyboardForChat(chatId) }
       );
       return;
     }
@@ -474,7 +603,7 @@ async function onMessage(message) {
 
   // если шаг неизвестен — сброс
   clearState(chatId);
-  await sendMessage(chatId, "⚠️ Сессия сброшена. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+  await sendMessage(chatId, "⚠️ Сессия сброшена. Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
 }
 
 async function onCallback(cb) {
@@ -497,7 +626,7 @@ async function onCallback(cb) {
     }
     clearState(chatId);
     await editMessage(chatId, messageId, "❌ Отменено.");
-    await sendMessage(chatId, "Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+    await sendMessage(chatId, "Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
     return;
   }
 
@@ -506,7 +635,7 @@ async function onCallback(cb) {
     const st = getState(chatId);
     if (!st || st.step !== "REPORT_WAIT_PERIOD") {
       await sendMessage(chatId, "⚠️ Сессия отчёта устарела. Нажмите «📊 Отчёт» ещё раз.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: menuKeyboardForChat(chatId),
       });
       return;
     }
@@ -538,13 +667,43 @@ async function onCallback(cb) {
     return;
   }
 
+  // Отправить отчёт в Excel (после просмотра текстового отчёта)
+  if (data === "REPORT_EXCEL") {
+    const st = getState(chatId);
+    if (!st || st.step !== "REPORT_SENT" || st.data.fromTs == null || st.data.toTs == null) {
+      await sendMessage(chatId, "⚠️ Сначала выберите период и сформируйте отчёт (📊 Отчёт).", {
+        reply_markup: menuKeyboardForChat(chatId),
+      });
+      return;
+    }
+    const from = new Date(st.data.fromTs);
+    const to = new Date(st.data.toTs);
+    const scope = st.data.scope || "ADMIN";
+    const masterTgId = st.data.masterTgId || null;
+    let filePath;
+    try {
+      filePath = buildExcelReport(from, to, { scope, masterTgId });
+      const caption = `📊 Отчёт ${formatDate(from)}–${formatDate(to)}`;
+      await sendDocument(chatId, filePath, caption);
+      fs.unlink(filePath, () => {});
+    } catch (err) {
+      console.error("Excel report error:", err);
+      await sendMessage(chatId, "⚠️ Не удалось сформировать Excel. Попробуйте позже.", {
+        reply_markup: menuKeyboardForChat(chatId),
+      });
+    }
+    clearState(chatId);
+    await sendMessage(chatId, "Готово. Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
+    return;
+  }
+
   // MASTER: берёт заявку
   if (data.startsWith("MASTER_ACCEPT:")) {
     const orderId = data.split(":")[1];
     const order = orders.get(orderId);
     if (!order) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -561,21 +720,124 @@ async function onCallback(cb) {
       formatOrderForMaster(order) + "\n\n✅ Вы взяли эту заявку.",
     );
 
-    setState(chatId, "MASTER_WAIT_TIME", { orderId });
-    await sendMessage(
-      chatId,
-      "🕒 Укажите, когда клиент может подойти (например: 25.03 15:30).",
-      { reply_markup: mainMenuReplyKeyboard() }
-    );
+    const now = new Date();
+    const yyyymm = formatYyyymm(now.getFullYear(), now.getMonth() + 1);
+    setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
+    await sendMessage(chatId, "📅 Выберите дату визита:", {
+      reply_markup: masterCalendarKeyboard(orderId, yyyymm),
+    });
 
     if (order.adminChatId) {
       await sendMessage(
         order.adminChatId,
         `✅ Мастер ${order.masterName} взял заявку #${order.id}.`,
-        { reply_markup: mainMenuReplyKeyboard() }
+        { reply_markup: adminMenuReplyKeyboard() }
       );
     }
 
+    return;
+  }
+
+  // Пустые (служебные) кнопки календаря
+  if (data === "NOOP") return;
+
+  // MASTER: навигация по календарю
+  if (data.startsWith("MN:")) {
+    const [, orderId, yyyymm] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату визита:", {
+      reply_markup: masterCalendarKeyboard(orderId, yyyymm),
+    });
+    return;
+  }
+
+  // MASTER: выбор даты
+  if (data.startsWith("MD:")) {
+    const [, orderId, yyyymmdd] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    setState(chatId, "MASTER_PICK_HOUR", { orderId, yyyymmdd });
+    await editMessage(chatId, messageId, "🕒 Выберите час:", {
+      reply_markup: masterHourKeyboard(orderId, yyyymmdd),
+    });
+    return;
+  }
+
+  // MASTER: выбор часа
+  if (data.startsWith("MH:")) {
+    const [, orderId, yyyymmdd, hh] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    setState(chatId, "MASTER_PICK_MINUTE", { orderId, yyyymmdd, hh });
+    await editMessage(chatId, messageId, `🕒 Выберите минуты для ${hh}:`, {
+      reply_markup: masterMinuteKeyboard(orderId, yyyymmdd, hh),
+    });
+    return;
+  }
+
+  // MASTER: выбор минут -> финал: отправка админу
+  if (data.startsWith("MM:")) {
+    const [, orderId, yyyymmdd, hh, mm] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+
+    const d = parseYyyymmdd(yyyymmdd);
+    if (!d) return;
+    const timeText = `${pad2(d.d)}.${pad2(d.mo)}.${d.y} ${hh}:${mm}`;
+
+    order.masterSuggestedTimeText = timeText;
+    order.status = "WAIT_ADMIN_CONFIRM_TIME";
+    clearState(chatId);
+
+    await editMessage(chatId, messageId, `✅ Предложено время: ${timeText}\n\nОтправлено администратору.`, {
+      reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
+    });
+
+    if (order.adminChatId) {
+      await sendMessage(
+        order.adminChatId,
+        `🕒 Мастер ${order.masterName} предложил время для заявки #${order.id}:\n` +
+          `⏰ ${order.masterSuggestedTimeText}\n\nПодтвердить?`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✅ Подтвердить время", callback_data: `ADMIN_CONFIRM_TIME:${order.id}` }],
+              [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+            ],
+          },
+        }
+      );
+    }
+
+    await sendMessage(chatId, "✅ Время отправлено администратору на подтверждение.", {
+      reply_markup: masterMenuReplyKeyboard(),
+    });
+    return;
+  }
+
+  // MASTER: назад к дате (из выбора часа)
+  if (data.startsWith("MB:")) {
+    const [, orderId, yyyymm] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату визита:", {
+      reply_markup: masterCalendarKeyboard(orderId, yyyymm),
+    });
+    return;
+  }
+
+  // MASTER: назад к часам (из выбора минут)
+  if (data.startsWith("MBH:")) {
+    const [, orderId, yyyymmdd] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    setState(chatId, "MASTER_PICK_HOUR", { orderId, yyyymmdd });
+    await editMessage(chatId, messageId, "🕒 Выберите час:", {
+      reply_markup: masterHourKeyboard(orderId, yyyymmdd),
+    });
     return;
   }
 
@@ -585,7 +847,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -606,7 +868,7 @@ async function onCallback(cb) {
       await sendMessage(
         order.adminChatId,
         `❌ Мастер ${order.masterName} отказался от заявки #${order.id}.`,
-        { reply_markup: mainMenuReplyKeyboard() }
+        { reply_markup: adminMenuReplyKeyboard() }
       );
     }
 
@@ -619,7 +881,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: adminMenuReplyKeyboard(),
       });
       return;
     }
@@ -656,7 +918,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.", {
-        reply_markup: mainMenuReplyKeyboard(),
+        reply_markup: masterMenuReplyKeyboard(),
       });
       return;
     }
@@ -678,14 +940,14 @@ async function onCallback(cb) {
 
     setState(chatId, "MASTER_WAIT_PHOTO_PLATE", { orderId });
     await sendMessage(chatId, "📸 Сначала отправьте фото номера автомобиля.", {
-      reply_markup: mainMenuReplyKeyboard(),
+      reply_markup: masterMenuReplyKeyboard(),
     });
 
     if (order.adminChatId) {
       await sendMessage(
         order.adminChatId,
         `🚗 Клиент по заявке #${order.id} прибыл в сервис.`,
-        { reply_markup: mainMenuReplyKeyboard() }
+        { reply_markup: adminMenuReplyKeyboard() }
       );
     }
 
@@ -696,7 +958,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_PICK_MASTER:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_MASTER") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -704,7 +966,7 @@ async function onCallback(cb) {
     const master = MASTERS.find((m) => Number(m.tgId) === masterTgId);
     if (!master) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -766,7 +1028,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_TYPE:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_TYPE") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -774,7 +1036,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -795,7 +1057,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_LOG:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_LOGISTICS") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -803,7 +1065,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -842,7 +1104,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_OPT:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_OPTION") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -853,13 +1115,13 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
     const option = OPTIONS[optIndex];
     if (!option) {
-      await sendMessage(chatId, "⚠️ Опция не найдена. Проверь массив OPTIONS.", { reply_markup: mainMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Опция не найдена. Проверь массив OPTIONS.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
 
@@ -957,13 +1219,12 @@ function parseDateRange(input) {
   return { from, to };
 }
 
-// Текстовый отчёт по заявкам за период
-async function sendTextReport(chatId, from, to, opts = {}) {
-  const scope = opts.scope || "ADMIN"; // ADMIN | MASTER
+// Общая фильтрация заявок за период для отчёта
+function getReportItems(from, to, opts = {}) {
+  const scope = opts.scope || "ADMIN";
   const masterTgId = opts.masterTgId || null;
-
   const all = Array.from(orders.values());
-  const items = all.filter((o) => {
+  return all.filter((o) => {
     if (!o.createdAt) return false;
     const t = new Date(o.createdAt).getTime();
     if (t < from.getTime() || t > to.getTime()) return false;
@@ -972,6 +1233,13 @@ async function sendTextReport(chatId, from, to, opts = {}) {
     }
     return true;
   });
+}
+
+// Текстовый отчёт по заявкам за период
+async function sendTextReport(chatId, from, to, opts = {}) {
+  const scope = opts.scope || "ADMIN";
+  const masterTgId = opts.masterTgId || null;
+  const items = getReportItems(from, to, opts);
 
   if (!items.length) {
     await sendMessage(
@@ -979,23 +1247,32 @@ async function sendTextReport(chatId, from, to, opts = {}) {
       scope === "MASTER"
         ? `📊 За период ${formatDate(from)}–${formatDate(to)} у вас нет заявок.`
         : `📊 За период ${formatDate(from)}–${formatDate(to)} заявок нет.`,
-      { reply_markup: mainMenuReplyKeyboard() }
+      { reply_markup: menuKeyboardForChat(chatId) }
     );
     return;
   }
 
   const total = items.length;
-  const installs = items.filter((o) => o.type === "INSTALL").length;
-  const repairs = items.filter((o) => o.type === "REPAIR").length;
+  const installs = items.filter((o) => o.type === "INSTALL");
+  const repairs = items.filter((o) => o.type === "REPAIR");
 
   const byCity = {};
   for (const o of items) {
     const c = o.city || "—";
     byCity[c] = (byCity[c] || 0) + 1;
   }
-
   const cityLines = Object.entries(byCity)
     .map(([city, cnt]) => `• ${city}: ${cnt}`)
+    .join("\n");
+
+  // По видам монтажа (опциям) — только для заявок типа INSTALL
+  const byOption = {};
+  for (const o of installs) {
+    const opt = o.option || "—";
+    byOption[opt] = (byOption[opt] || 0) + 1;
+  }
+  const optionLines = Object.entries(byOption)
+    .map(([opt, cnt]) => `• ${opt}: ${cnt}`)
     .join("\n");
 
   let header = `📊 Отчёт за период ${formatDate(from)}–${formatDate(to)}`;
@@ -1004,14 +1281,74 @@ async function sendTextReport(chatId, from, to, opts = {}) {
     if (m) header += `\n👷 Мастер: ${m.name}`;
   }
 
-  const text =
+  let text =
     `${header}\n\n` +
     `Всего заявок: ${total}\n` +
-    `🛠 Монтаж: ${installs}\n` +
-    `🧰 Ремонт / другое: ${repairs}\n\n` +
+    `🛠 Монтаж: ${installs.length}\n` +
+    `🧰 Ремонт / другое: ${repairs.length}\n\n` +
     `По городам:\n${cityLines}`;
+  if (optionLines) {
+    text += `\n\n📦 Монтаж по видам:\n${optionLines}`;
+  }
 
-  await sendMessage(chatId, text, { reply_markup: mainMenuReplyKeyboard() });
+  setState(chatId, "REPORT_SENT", {
+    fromTs: from.getTime(),
+    toTs: to.getTime(),
+    scope,
+    masterTgId,
+  });
+
+  const reportKeyboard = {
+    inline_keyboard: [[{ text: "📥 Отправить в Excel", callback_data: "REPORT_EXCEL" }]],
+  };
+  await sendMessage(chatId, text, { reply_markup: reportKeyboard });
+}
+
+// Сборка Excel-файла отчёта, возвращает путь к временному файлу
+function buildExcelReport(from, to, opts = {}) {
+  const items = getReportItems(from, to, opts);
+
+  const rows = [
+    [
+      "№",
+      "Дата",
+      "Тип",
+      "Вид монтажа",
+      "Город",
+      "Мастер",
+      "Логистика",
+      "Адрес",
+      "Телефон",
+      "Комментарий",
+      "Статус",
+    ],
+  ];
+
+  items.forEach((o, i) => {
+    rows.push([
+      i + 1,
+      o.createdAt ? formatDate(new Date(o.createdAt)) : "",
+      o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
+      o.type === "INSTALL" ? (o.option || "—") : "—",
+      o.city || "—",
+      o.masterName || "—",
+      o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
+      o.address || "—",
+      o.phone || "—",
+      (o.adminComment || "").replace(/\n/g, " "),
+      o.status || "—",
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Заявки");
+
+  const tmpDir = os.tmpdir();
+  const filename = `report_${from.getTime()}_${to.getTime()}.xlsx`;
+  const filePath = path.join(tmpDir, filename);
+  XLSX.writeFile(wb, filePath);
+  return filePath;
 }
 
 function formatOrderForMaster(order) {
