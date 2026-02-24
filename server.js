@@ -12,12 +12,10 @@ if (!BOT_TOKEN) console.error("❌ BOT_TOKEN not found in environment variables"
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // =============================
-// CONFIG: Masters
-// =============================
 const MASTERS = [
   { tgId: 7862998301, name: "Абдухалим", city: "Душанбе" },
   { tgId: 7692783802, name: "Иброхимчон", city: "Худжанд" },
-  { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" }, 
+  { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" },
 ];
 
 // Опции (выбирает АДМИН)
@@ -32,13 +30,13 @@ const OPTIONS = [
 ];
 
 // =============================
-// In-memory storage 
-// (На платном Render данные будут храниться до следующего деплоя)
+// In-memory storage (для теста)
+// Потом заменим на Google Sheets.
 // =============================
 let lastOrderId = 0;
-const orders = new Map(); // orderId -> order
+const orders = new Map();    // orderId -> order
 const userState = new Map(); // chatId -> { step, data }
-const dedupe = new Map(); // update_id -> ts
+const dedupe = new Map();    // update_id -> ts
 
 function nowTs() {
   return Date.now();
@@ -84,16 +82,21 @@ async function answerCb(callbackQueryId) {
 // =============================
 // UI builders
 // =============================
-function mainMenuKeyboard() {
+
+// ✅ Главное меню — Reply Keyboard (кнопки прямо в строке ввода, без /start)
+function mainMenuReplyKeyboard() {
   return {
-    inline_keyboard: [
-      [{ text: "📝 Новая заявка", callback_data: "ADMIN_NEW" }],
-      [{ text: "🆔 Мой ID", callback_data: "GET_MY_ID" }],
-      [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+    keyboard: [
+      [{ text: "📝 Новая заявка (монтаж)" }, { text: "🧰 Ремонт / другое" }],
+      [{ text: "🆔 Мой ID" }, { text: "❌ Отмена" }],
     ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    selective: false,
   };
 }
 
+// Inline keyboards (для выбора)
 function mastersKeyboard() {
   const rows = MASTERS.map((m) => [
     { text: `📍 ${m.city} | 👷 ${m.name}`, callback_data: `ADMIN_PICK_MASTER:${m.tgId}` },
@@ -107,6 +110,16 @@ function orderTypeKeyboard() {
     inline_keyboard: [
       [{ text: "🛠 Монтаж", callback_data: "ADMIN_TYPE:INSTALL" }],
       [{ text: "🧰 Ремонт / другое", callback_data: "ADMIN_TYPE:REPAIR" }],
+      [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+    ],
+  };
+}
+
+function logisticsKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "🚗 Выезд к клиенту", callback_data: "ADMIN_LOG:VISIT" }],
+      [{ text: "🏢 Клиент сам приедет", callback_data: "ADMIN_LOG:COME" }],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
   };
@@ -158,37 +171,92 @@ async function onMessage(message) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
 
-  // Commands
+  // Команды оставим, но меню выдаём без /start
   if (text === "/start") {
-    await sendMessage(chatId, "👋 Привет! Главное меню активировано.", { reply_markup: mainMenuKeyboard() });
+    await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: mainMenuReplyKeyboard() });
     return;
   }
   if (text === "/getmyid") {
-    await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`);
+    await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`, {
+      reply_markup: mainMenuReplyKeyboard(),
+    });
+    return;
+  }
+
+  // Кнопки (Reply Keyboard) — работают как обычный текст
+  if (text === "🆔 Мой ID") {
+    await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`, {
+      reply_markup: mainMenuReplyKeyboard(),
+    });
+    return;
+  }
+
+  if (text === "❌ Отмена") {
+    clearState(chatId);
+    await sendMessage(chatId, "❌ Отменено.", { reply_markup: mainMenuReplyKeyboard() });
+    return;
+  }
+
+  if (text === "📝 Новая заявка (монтаж)") {
+    setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "INSTALL" });
+    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: mainMenuReplyKeyboard() });
+    return;
+  }
+
+  if (text === "🧰 Ремонт / другое") {
+    setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "REPAIR" });
+    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: mainMenuReplyKeyboard() });
     return;
   }
 
   // FSM
   const st = getState(chatId);
-  if (!st) return;
+  if (!st) {
+    // Если человек написал что-то без процесса — просто покажем меню
+    await sendMessage(chatId, "Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+    return;
+  }
 
   // ADMIN: ждём телефон
   if (st.step === "ADMIN_WAIT_PHONE") {
     st.data.phone = text;
-    setState(chatId, "ADMIN_WAIT_ADDRESS", st.data);
-    await sendMessage(
-      chatId, 
-      "📍 Введите точный адрес клиента (улица, дом, ориентир):", 
-      { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
-    );
+    setState(chatId, "ADMIN_WAIT_MASTER", st.data);
+    await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", {
+      reply_markup: { remove_keyboard: true }, // чтобы не мешало во время выбора inline
+    });
+    await sendMessage(chatId, "Список мастеров:", { reply_markup: mastersKeyboard() });
     return;
   }
 
-  // ADMIN: ждём адрес
+  // ADMIN: ждём адрес (только при выезде)
   if (st.step === "ADMIN_WAIT_ADDRESS") {
-    st.data.address = text;
-    setState(chatId, "ADMIN_WAIT_MASTER", st.data);
-    await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", { reply_markup: mastersKeyboard() });
+    const orderId = st.data.orderId;
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      return;
+    }
+
+    order.address = text;
+
+    // дальше: REPAIR -> comment, INSTALL -> options
+    if (order.type === "REPAIR") {
+      setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
+      await sendMessage(
+        chatId,
+        `🧰 Ремонт / другое\n🚗 Выезд к клиенту\n📍 Адрес: ${order.address}\n\n✍️ Напишите комментарий (что сломано / что нужно сделать):`,
+        { reply_markup: mainMenuReplyKeyboard() }
+      );
+      return;
+    }
+
+    setState(chatId, "ADMIN_WAIT_OPTION", { orderId });
+    await sendMessage(
+      chatId,
+      `🛠 Монтаж\n🚗 Выезд к клиенту\n📍 Адрес: ${order.address}\n\nВыберите опцию:`,
+      { reply_markup: optionsKeyboard(orderId) }
+    );
     return;
   }
 
@@ -198,7 +266,7 @@ async function onMessage(message) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
@@ -211,13 +279,13 @@ async function onMessage(message) {
     await sendOrderToMaster(order);
 
     // подтверждение админу
-    await sendMessage(
-      chatId,
-      formatAdminConfirm(order),
-      { reply_markup: mainMenuKeyboard() }
-    );
+    await sendMessage(chatId, formatAdminConfirm(order), { reply_markup: mainMenuReplyKeyboard() });
     return;
   }
+
+  // если шаг неизвестен — сброс
+  clearState(chatId);
+  await sendMessage(chatId, "⚠️ Сессия сброшена. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
 }
 
 async function onCallback(cb) {
@@ -230,24 +298,8 @@ async function onCallback(cb) {
   // Cancel
   if (data === "CANCEL") {
     clearState(chatId);
-    await editMessage(chatId, messageId, "❌ Отменено.", { reply_markup: mainMenuKeyboard() });
-    return;
-  }
-
-  if (data === "GET_MY_ID") {
-    await sendMessage(chatId, `Ваш Telegram ID: ${cb.from.id}\nChat ID: ${chatId}`, { reply_markup: mainMenuKeyboard() });
-    return;
-  }
-
-  // ADMIN: New order
-  if (data === "ADMIN_NEW") {
-    setState(chatId, "ADMIN_WAIT_PHONE", {});
-    await editMessage(
-      chatId,
-      messageId,
-      "📞 Введите номер телефона клиента:",
-      { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
-    );
+    await editMessage(chatId, messageId, "❌ Отменено.");
+    await sendMessage(chatId, "Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
     return;
   }
 
@@ -255,7 +307,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_PICK_MASTER:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_MASTER") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Нажмите «Новая заявка».", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
@@ -263,7 +315,7 @@ async function onCallback(cb) {
     const master = MASTERS.find((m) => Number(m.tgId) === masterTgId);
     if (!master) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
@@ -272,22 +324,36 @@ async function onCallback(cb) {
       id: orderId,
       createdAt: new Date().toISOString(),
       phone: st.data.phone,
-      address: st.data.address,
 
       masterTgId: master.tgId,
       masterName: master.name,
       city: master.city,
 
-      type: null,          // INSTALL | REPAIR
-      option: null,        // для INSTALL
+      type: st.data.presetType || null, // INSTALL | REPAIR
+      logistics: null,                  // VISIT | COME
+      address: "",                      // адрес при VISIT
+
+      option: null,                     // для INSTALL
       adminComment: "",
 
       status: "NEW",
     };
     orders.set(orderId, order);
 
-    setState(chatId, "ADMIN_WAIT_TYPE", { orderId });
+    // Если тип уже задан кнопкой меню — сразу логистика
+    if (order.type) {
+      setState(chatId, "ADMIN_WAIT_LOGISTICS", { orderId });
+      await editMessage(
+        chatId,
+        messageId,
+        `✅ Мастер выбран.\n📍 Город: ${order.city}\n👷 Мастер: ${order.masterName}\n\nВыберите логистику (выезд/сам приедет):`,
+        { reply_markup: logisticsKeyboard() }
+      );
+      return;
+    }
 
+    // Иначе — сначала спросим тип
+    setState(chatId, "ADMIN_WAIT_TYPE", { orderId });
     await editMessage(
       chatId,
       messageId,
@@ -301,7 +367,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_TYPE:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_TYPE") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Нажмите «Новая заявка».", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
@@ -309,43 +375,75 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
-    const type = data.split(":")[1];
-    order.type = type;
+    order.type = data.split(":")[1]; // INSTALL | REPAIR
 
-    if (type === "REPAIR") {
-      // ремонт: сразу просим комментарий
+    // ✅ после типа — всегда логистика
+    setState(chatId, "ADMIN_WAIT_LOGISTICS", { orderId });
+    await editMessage(
+      chatId,
+      messageId,
+      `✅ Тип выбран: ${order.type === "REPAIR" ? "Ремонт / другое" : "Монтаж"}\n\nВыберите логистику:`,
+      { reply_markup: logisticsKeyboard() }
+    );
+    return;
+  }
+
+  // ADMIN: picked logistics
+  if (data.startsWith("ADMIN_LOG:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_LOGISTICS") {
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
+      return;
+    }
+
+    const orderId = st.data.orderId;
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      return;
+    }
+
+    order.logistics = data.split(":")[1]; // VISIT | COME
+
+    // ✅ Если выезд — сначала адрес
+    if (order.logistics === "VISIT") {
+      setState(chatId, "ADMIN_WAIT_ADDRESS", { orderId });
+      await editMessage(chatId, messageId, "🚗 Выезд к клиенту\n\n📍 Укажите адрес клиента:", {
+        reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
+      });
+      return;
+    }
+
+    // ✅ Если клиент сам приедет — адрес не нужен
+    if (order.type === "REPAIR") {
       setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
       await editMessage(
         chatId,
         messageId,
-        `🧰 Ремонт / другое\n\nНапишите комментарий (что сломано / что нужно сделать):`,
+        `🧰 Ремонт / другое\n🏢 Клиент сам приедет\n\n✍️ Напишите комментарий (что сломано / что нужно сделать):`,
         { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
       );
       return;
     }
 
-    if (type === "INSTALL") {
-      // монтаж: админ выбирает опцию
-      setState(chatId, "ADMIN_WAIT_OPTION", { orderId });
-      await editMessage(
-        chatId,
-        messageId,
-        "🛠 Монтаж\n\nВыберите опцию:",
-        { reply_markup: optionsKeyboard(orderId) }
-      );
-      return;
-    }
+    // INSTALL -> options
+    setState(chatId, "ADMIN_WAIT_OPTION", { orderId });
+    await editMessage(chatId, messageId, "🛠 Монтаж\n🏢 Клиент сам приедет\n\nВыберите опцию:", {
+      reply_markup: optionsKeyboard(orderId),
+    });
+    return;
   }
 
   // ADMIN: picked option
   if (data.startsWith("ADMIN_OPT:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_OPTION") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Нажмите «Новая заявка».", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
@@ -356,13 +454,13 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
     order.option = option;
 
-    // после выбора опции — ВСЕГДА комментарий админа (несколько устройств/модель/доп. работы)
+    // после выбора опции — ВСЕГДА комментарий админа
     setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
 
     const hint =
@@ -370,12 +468,9 @@ async function onCallback(cb) {
       "Например: «2 устройства: FMB920 + FMB125, поставить реле, SIM клиента, серийники позже»\n" +
       "или «Другая модель: …»";
 
-    await editMessage(
-      chatId,
-      messageId,
-      `✅ Опция выбрана: ${order.option}\n\n${hint}`,
-      { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
-    );
+    await editMessage(chatId, messageId, `✅ Опция выбрана: ${order.option}\n\n${hint}`, {
+      reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
+    });
     return;
   }
 }
@@ -383,32 +478,45 @@ async function onCallback(cb) {
 // =============================
 // Formatting / sending
 // =============================
+function typeLabel(order) {
+  return order.type === "REPAIR" ? "🧰 Ремонт / другое" : "🛠 Монтаж";
+}
+
+function logisticsLabel(order) {
+  if (order.logistics === "VISIT") return "🚗 Выезд к клиенту";
+  if (order.logistics === "COME") return "🏢 Клиент сам приедет";
+  return "-";
+}
+
 function formatOrderForMaster(order) {
-  const typeLabel = order.type === "REPAIR" ? "🧰 Ремонт / другое" : "🛠 Монтаж";
   const optLine = order.type === "INSTALL" ? `📦 Опция: ${order.option || "-"}` : "";
+  const addrLine = order.logistics === "VISIT" ? `📍 Адрес: ${order.address || "-"}` : "";
   const commentLine = `💬 Комментарий:\n${order.adminComment || "-"}`;
 
   return (
-    `${typeLabel} #${order.id}\n` +
+    `${typeLabel(order)} #${order.id}\n` +
     `📞 Телефон: ${order.phone}\n` +
     `📍 Город: ${order.city}\n` +
-    `🏠 Адрес: ${order.address}\n` +
     `👷 Мастер: ${order.masterName}\n` +
+    `🚗/🏢: ${logisticsLabel(order)}\n` +
+    (addrLine ? `${addrLine}\n` : "") +
     (optLine ? `${optLine}\n` : "") +
     `\n${commentLine}`
   );
 }
 
 function formatAdminConfirm(order) {
-  const typeLabel = order.type === "REPAIR" ? "Ремонт/другое" : "Монтаж";
   const optLine = order.type === "INSTALL" ? `📦 Опция: ${order.option || "-"}` : "";
+  const addrLine = order.logistics === "VISIT" ? `📍 Адрес: ${order.address || "-"}` : "";
+
   return (
     `✅ Заявка #${order.id} отправлена мастеру.\n` +
     `📞 Телефон: ${order.phone}\n` +
     `📍 Город: ${order.city}\n` +
-    `🏠 Адрес: ${order.address}\n` +
     `👷 Мастер: ${order.masterName}\n` +
-    `🧾 Тип: ${typeLabel}\n` +
+    `🧾 Тип: ${order.type === "REPAIR" ? "Ремонт / другое" : "Монтаж"}\n` +
+    `🚗/🏢: ${logisticsLabel(order)}\n` +
+    (addrLine ? `${addrLine}\n` : "") +
     (optLine ? `${optLine}\n` : "") +
     `💬 Комментарий: ${order.adminComment || "-"}`
   );
@@ -416,7 +524,8 @@ function formatAdminConfirm(order) {
 
 async function sendOrderToMaster(order) {
   const text = formatOrderForMaster(order);
-  await sendMessage(order.masterTgId, text, { reply_markup: mainMenuKeyboard() });
+  // мастеру можно отправлять без меню админа — но оставим ReplyKeyboard чтобы было удобно
+  await sendMessage(order.masterTgId, text, { reply_markup: mainMenuReplyKeyboard() });
 }
 
 // =============================
