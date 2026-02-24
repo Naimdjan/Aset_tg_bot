@@ -16,7 +16,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const MASTERS = [
   { id: "abdulakhim", name: "Абдулaхим", city: "Худжанд", telegramId: 7862998301 },
   { id: "ibrohimjon", name: "Иброхимчон", city: "Душанбе", telegramId: 7692783802 },
-  { id: "akali",      name: "Акаи Шухрат", city: "Бохтар", telegramId:  }
+  { id: "akali",      name: "Акаи Шухрат", city: "Бохтар", telegramId: 7862998301 }
 ];
 
 // ======================
