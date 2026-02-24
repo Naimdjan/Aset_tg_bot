@@ -960,8 +960,9 @@ async function onMessage(message) {
 
   // MASTER: отправка фото по кнопке (номер / пробег / устройство)
   if (st.step === "MASTER_WAIT_PHOTO") {
-    const orderId = st.data.orderId;
+    const orderId   = st.data.orderId;
     const photoType = st.data.photoType;
+    const origMsgId = st.data.messageId; // сообщение с клавиатурой заявки
     const order = orders.get(orderId);
     if (!order || order.masterTgId !== chatId) {
       clearState(chatId);
@@ -973,22 +974,19 @@ async function onMessage(message) {
 
     const photos = message.photo || [];
     if (!photos.length) {
-      await sendMessage(chatId, "⚠️ Пожалуйста, отправьте именно фото.", {
-        reply_markup: masterMenuReplyKeyboard(),
-      });
+      await sendMessage(chatId, "⚠️ Пожалуйста, отправьте именно фото.");
       return;
     }
 
     const fileId = photos[photos.length - 1].file_id;
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
 
-    // Все фото сохраняются в devicePhotos по ключу слота
     if (!order.devicePhotos) order.devicePhotos = {};
     order.devicePhotos[photoType] = fileId;
     const slot = getPhotoSlots(order).find(s => s.key === photoType);
     const photoLabel = slot ? slot.label : photoType;
 
-    // Немедленно пересылаем фото администратору
+    // Пересылаем фото администратору
     safeSend(adminChatIdImm, `📷 Мастер ${order.masterName || ""}: ${photoLabel} (#${order.id})`);
     await sendPhoto(adminChatIdImm, fileId, `📷 ${photoLabel} — заявка #${order.id}`).catch(() => {});
     if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) {
@@ -996,38 +994,53 @@ async function onMessage(message) {
       sendPhoto(SUPER_ADMIN_ID, fileId, `📷 ${photoLabel} — заявка #${order.id}`).catch(() => {});
     }
 
+    clearState(chatId);
     const kb = masterArrivalPhotoKeyboard(orderId, order);
+
     if (kb) {
-      clearState(chatId);
-      await sendMessage(chatId, "✅ Фото отправлено. Выберите следующее или отправьте оставшиеся:", {
-        reply_markup: kb,
-      });
+      // Ещё есть слоты — редактируем то же сообщение заявки
+      if (origMsgId) {
+        await tg("editMessageText", {
+          chat_id: chatId,
+          message_id: origMsgId,
+          text: `📷 Заявка #${order.id} — ${photoLabel} ✅\n\nВыберите следующее фото:`,
+          reply_markup: kb,
+        }).catch(() => {});
+      } else {
+        await sendMessage(chatId, `✅ Фото (${photoLabel}) принято. Выберите следующее:`, { reply_markup: kb });
+      }
       return;
     }
 
-    // Все фото/пропуски собраны — показываем кнопку «Выполнено»
+    // Все фото/пропуски собраны
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
     const warnMsg = getMissingPhotoWarning(order);
+    const adminChatIdW = order.adminChatId || SUPER_ADMIN_ID;
     if (warnMsg) {
-      await sendMessage(chatId, warnMsg);
-      // Немедленно информируем администратора
-      const adminChatIdW = order.adminChatId || SUPER_ADMIN_ID;
       safeSend(adminChatIdW, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
       if (String(adminChatIdW) !== String(SUPER_ADMIN_ID)) {
         safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
       }
     }
-    await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены.`);
-    await sendMessage(
-      chatId,
-      `<b>ПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».</b>`,
-      {
+    const doneText =
+      `✅ Заявка #${order.id} — все фото сохранены.` +
+      (warnMsg ? `\n\n${warnMsg}` : "") +
+      `\n\n<b>По завершению работ нажмите «✅ Выполнено».</b>`;
+    if (origMsgId) {
+      await tg("editMessageText", {
+        chat_id: chatId,
+        message_id: origMsgId,
+        text: doneText,
         parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
-        },
-      }
-    );
+        reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] },
+      }).catch(() => {});
+    } else {
+      if (warnMsg) await sendMessage(chatId, warnMsg);
+      await sendMessage(chatId, doneText, {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] },
+      });
+    }
     return;
   }
 
@@ -1638,15 +1651,23 @@ async function onCallback(cb) {
     return;
   }
 
-  // MASTER: нажал кнопку «📷 Фото ...» — ждём отправку фото
+  // MASTER: нажал кнопку фото — ждём отправку фото
   if (data.startsWith("MASTER_PHOTO:")) {
     const [, orderId, photoType] = data.split(":");
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
-    setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
-    // Тихо обновляем клавиатуру
-    await tg("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: masterArrivalPhotoKeyboard(orderId, order) }).catch(() => {});
+    const slot = getPhotoSlots(order).find(s => s.key === photoType);
+    const label = slot ? slot.label : photoType;
+
+    // Сохраняем messageId чтобы редактировать именно это сообщение при получении фото
+    setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType, messageId });
+    // Обновляем текст сообщения — показываем какой слот ожидается
+    await editMessage(
+      chatId, messageId,
+      `📷 Заявка #${order.id} — ожидается фото: ${label}\n\nОтправьте фото в чат:`,
+      { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
+    ).catch(() => {});
     return;
   }
 
@@ -1670,30 +1691,30 @@ async function onCallback(cb) {
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     if (kb) {
-      // Тихо обновляем только клавиатуру, не меняя текст сообщения
       await tg("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: kb }).catch(() => {});
       return;
     }
 
+    // Все слоты обработаны — показываем «Выполнено» в том же сообщении
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
-    await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены.`);
     const warnSkip = getMissingPhotoWarning(order);
+    const adminChatIdWS = order.adminChatId || SUPER_ADMIN_ID;
     if (warnSkip) {
-      await sendMessage(chatId, warnSkip);
-      const adminChatIdWS = order.adminChatId || SUPER_ADMIN_ID;
       safeSend(adminChatIdWS, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnSkip}`);
       if (String(adminChatIdWS) !== String(SUPER_ADMIN_ID)) {
         safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnSkip}`);
       }
     }
-    await sendMessage(
-      chatId,
-      `<b>ПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».</b>`,
+    await editMessage(
+      chatId, messageId,
+      `✅ Заявка #${order.id} — все данные сохранены.` +
+      (warnSkip ? `\n\n${warnSkip}` : "") +
+      `\n\n<b>По завершению работ нажмите «✅ Выполнено».</b>`,
       {
         parse_mode: "HTML",
         reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] },
       }
-    );
+    ).catch(() => {});
     return;
   }
 
