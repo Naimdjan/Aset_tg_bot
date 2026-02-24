@@ -766,7 +766,7 @@ async function onMessage(message) {
     return;
   }
 
-  if (text === "💬 Написать админу" || text === "💬 Продолжить чат") {
+  if (text === "💬 Написать админу" || text === "💬 Продолжить чат" || text === "💬 Чат с мастером") {
     if (isMasterChat(chatId)) {
       // мастер: чат с админом
       setState(chatId, "MASTER_CHAT_WITH_ADMIN", {});
@@ -1884,7 +1884,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_CHAT_MASTER:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_CHAT_PICK_MASTER") {
-      await sendMessage(chatId, "⚠️ Сессия чата устарела. Нажмите «💬 Продолжить чат» ещё раз.", {
+      await sendMessage(chatId, "⚠️ Сессия чата устарела. Нажмите «💬 Чат с мастером» ещё раз.", {
         reply_markup: menuKeyboardForChat(chatId),
       });
       return;
