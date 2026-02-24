@@ -45,92 +45,70 @@ const MASTERS = [
   { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" },
 ];
 
-// Опции (выбирает АДМИН)
-const OPTIONS = [
-  "FMB920",
-  "FMB140",
-  "FMB140+Temp.",
-  "FMB125+DUT",
-  "FMB125+Temp.",
-  "Video",
-  "Реле",
-  "Другое",
-];
+// Опции сгруппированы: Устройства / Аксессуары / Другое
+const OPTIONS_DEVICES     = ["FMB920", "FMB125", "FMB140", "DUT"];
+const OPTIONS_ACCESSORIES = ["Реле", "Temp."];
+const OPTIONS_OTHER       = ["Video", "Другое"];
+const OPTIONS = [...OPTIONS_DEVICES, ...OPTIONS_ACCESSORIES, ...OPTIONS_OTHER];
 
-// Группы устройств
 // Аксессуары — фото не нужны
-const ACCESSORIES = new Set(["Реле", "Temp."]);
-
-// Разворачивает опцию в единицы устройств для фото-слотов.
-// Возвращает массив { name, hasDut } или [] для аксессуаров.
-function expandDeviceForPhotos(opt) {
-  if (ACCESSORIES.has(opt)) return [];
-  const combos = {
-    "FMB125+DUT":   [{ name: "FMB125", hasDut: true  }],
-    "FMB125+Temp.": [{ name: "FMB125", hasDut: false }],
-    "FMB140+Temp.": [{ name: "FMB140", hasDut: false }],
-  };
-  if (combos[opt]) return combos[opt];
-  return [{ name: opt, hasDut: false }];
-}
+const ACCESSORIES = new Set(OPTIONS_ACCESSORIES);
 
 // Возвращает полный список фото-слотов для заявки.
-// Каждое устройство-единица даёт 3–4 слота: device + [dut] + odometer + plate.
-// Аксессуары (Реле, Temp.) — без слотов.
-// Ключ слота: "{DeviceName}_{unitIdx}_{photoType}"
-// photoType: "device" | "dut" | "odometer" | "plate"
+// Правила:
+//  - Аксессуары (Реле, Temp.) → без фото
+//  - Если выбраны FMB125 И DUT: DUT привязывается к FMB125 (не отдельно)
+//  - Каждая единица устройства: device (обяз.) + [dut (обяз.)] + odometer + plate
+// Ключ: "{DeviceName}_{unitIdx}_{photoType}"
 function getPhotoSlots(order) {
   const opts = order.options?.length ? order.options : (order.option ? [order.option] : []);
   if (!opts.length) return [];
 
+  const hasFMB125 = opts.includes("FMB125");
+  const hasDutOpt = opts.includes("DUT");
+  const dutPaired = hasFMB125 && hasDutOpt; // DUT будет привязан к FMB125
+
   const deviceCounts = {};
   const slots = [];
 
+  const addUnitSlots = (name, unitIdx, hasDut) => {
+    const n = unitIdx + 1;
+    slots.push({ key: `${name}_${unitIdx}_device`,   label: `Фото ${name}-${n}`,         deviceName: name, photoType: "device",   unitIdx, required: true  });
+    if (hasDut) {
+      slots.push({ key: `${name}_${unitIdx}_dut`,    label: `DUT для ${name}-${n}`,       deviceName: name, photoType: "dut",      unitIdx, required: true  });
+    }
+    slots.push({ key: `${name}_${unitIdx}_odometer`, label: `Пробег для ${name}-${n}`,   deviceName: name, photoType: "odometer", unitIdx, required: false });
+    slots.push({ key: `${name}_${unitIdx}_plate`,    label: `Номер для ${name}-${n}`,     deviceName: name, photoType: "plate",    unitIdx, required: false });
+  };
+
   for (const opt of opts) {
+    if (ACCESSORIES.has(opt)) continue;
+    if (opt === "DUT" && dutPaired) continue; // DUT обрабатывается внутри FMB125
+
     const qty = order.deviceQuantities?.[opt] || 1;
-    const units = expandDeviceForPhotos(opt);
+    const dutQty = dutPaired && opt === "FMB125" ? (order.deviceQuantities?.["DUT"] || 1) : 0;
 
-    for (const unit of units) {
-      for (let i = 0; i < qty; i++) {
-        const unitIdx = deviceCounts[unit.name] || 0;
-        deviceCounts[unit.name] = unitIdx + 1;
-        const n = unitIdx + 1; // номер для отображения
+    for (let i = 0; i < qty; i++) {
+      const unitIdx = deviceCounts[opt] || 0;
+      deviceCounts[opt] = unitIdx + 1;
+      // Первые min(qty,dutQty) единиц FMB125 получают DUT
+      addUnitSlots(opt, unitIdx, dutPaired && opt === "FMB125" && i < dutQty);
+    }
 
-        // Основное фото устройства (обязательное)
-        slots.push({
-          key: `${unit.name}_${unitIdx}_device`,
-          label: `Фото ${unit.name}-${n}`,
-          deviceName: unit.name, photoType: "device", unitIdx, required: true,
-        });
-
-        // DUT-фото (обязательное, только для FMB125+DUT)
-        if (unit.hasDut) {
-          slots.push({
-            key: `${unit.name}_${unitIdx}_dut`,
-            label: `DUT для ${unit.name}-${n}`,
-            deviceName: unit.name, photoType: "dut", unitIdx, required: true,
-          });
-        }
-
-        // Фото пробега (необязательное)
-        slots.push({
-          key: `${unit.name}_${unitIdx}_odometer`,
-          label: `Пробег для ${unit.name}-${n}`,
-          deviceName: unit.name, photoType: "odometer", unitIdx, required: false,
-        });
-
-        // Фото номера (необязательное)
-        slots.push({
-          key: `${unit.name}_${unitIdx}_plate`,
-          label: `Номер для ${unit.name}-${n}`,
-          deviceName: unit.name, photoType: "plate", unitIdx, required: false,
-        });
+    // Если DUT > FMB125 — оставшиеся DUT как самостоятельные устройства
+    if (dutPaired && opt === "FMB125") {
+      const fmb125Qty = qty;
+      const dutQtyVal = order.deviceQuantities?.["DUT"] || 1;
+      for (let i = fmb125Qty; i < dutQtyVal; i++) {
+        const unitIdx = deviceCounts["DUT"] || 0;
+        deviceCounts["DUT"] = unitIdx + 1;
+        addUnitSlots("DUT", unitIdx, false);
       }
     }
   }
 
   // #region agent log
-  fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e7f15'},body:JSON.stringify({sessionId:'0e7f15',location:'server.js:getPhotoSlots',message:'slots generated',data:{opts,slots:slots.map(s=>s.key)},timestamp:Date.now()})}).catch(()=>{});
+  fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e7f15'},body:JSON.stringify({sessionId:'0e7f15',location:'server.js:getPhotoSlots',message:'slots',data:{opts,dutPaired,slots:slots.map(s=>s.key)},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
   return slots;
 }
@@ -508,15 +486,27 @@ function masterHourKeyboard(orderId, yyyymmdd) {
 // Мульти-выбор: selected — массив выбранных индексов
 function optionsKeyboard(orderId, selected = []) {
   const rows = [];
-  for (let i = 0; i < OPTIONS.length; i += 2) {
-    const row = [
-      { text: (selected.includes(i) ? "✅ " : "") + OPTIONS[i], callback_data: `ADMIN_OPT:${orderId}:${i}` },
-    ];
-    if (OPTIONS[i + 1]) {
-      row.push({ text: (selected.includes(i + 1) ? "✅ " : "") + OPTIONS[i + 1], callback_data: `ADMIN_OPT:${orderId}:${i + 1}` });
+
+  // Вспомогательная функция: рядами по 2 кнопки из массива названий
+  const addGroup = (header, names) => {
+    rows.push([{ text: header, callback_data: "NOOP" }]);
+    for (let i = 0; i < names.length; i += 2) {
+      const row = [];
+      for (let j = i; j < Math.min(i + 2, names.length); j++) {
+        const idx = OPTIONS.indexOf(names[j]);
+        row.push({
+          text: (selected.includes(idx) ? "✅ " : "") + names[j],
+          callback_data: `ADMIN_OPT:${orderId}:${idx}`,
+        });
+      }
+      rows.push(row);
     }
-    rows.push(row);
-  }
+  };
+
+  addGroup("🔧 Устройства", OPTIONS_DEVICES);
+  addGroup("🔩 Аксессуары", OPTIONS_ACCESSORIES);
+  addGroup("📦 Другое", OPTIONS_OTHER);
+
   if (selected.length > 0) {
     rows.push([{ text: `✅ Подтвердить выбор (${selected.length})`, callback_data: `ADMIN_OPT_CONFIRM:${orderId}` }]);
   }
@@ -904,6 +894,9 @@ async function onCallback(cb) {
     await sendMessage(chatId, "🔐 Доступ закрыт. Введите /start и укажите пароль.");
     return;
   }
+
+  // Разделители в клавиатурах (не кликабельные заголовки)
+  if (data === "NOOP") return;
 
   // Cancel — сброс текущего шага без пароля
   if (data === "CANCEL") {
