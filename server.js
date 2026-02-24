@@ -1602,7 +1602,7 @@ async function onCallback(cb) {
       await editMessage(
         chatId,
         messageId,
-        `✅ Мастер выбран.\n📍 Город: ${order.city}\n👷 Мастер: ${order.masterName}\n\nВыберите логистику (выезд/сам приедет):`,
+        `✅ Мастер выбран.\n\nВыберите логистику:`,
         { reply_markup: logisticsKeyboard() }
       );
       return;
@@ -1613,7 +1613,7 @@ async function onCallback(cb) {
     await editMessage(
       chatId,
       messageId,
-      `✅ Мастер выбран.\n📍 Город: ${order.city}\n👷 Мастер: ${order.masterName}\n\nВыберите тип заявки:`,
+      `✅ Мастер выбран.\n\nВыберите тип заявки:`,
       { reply_markup: orderTypeKeyboard() }
     );
     return;
