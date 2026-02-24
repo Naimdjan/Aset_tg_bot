@@ -328,9 +328,8 @@ function reportPeriodKeyboard() {
       ],
       [
         { text: "📅 7 дней", callback_data: "REPORT_PERIOD:LAST_7" },
-        { text: "✏️ Свой период", callback_data: "REPORT_PERIOD:CUSTOM" },
+        { text: "📅 Свой период", callback_data: "REPORT_PERIOD:PERIOD" },
       ],
-      [{ text: "🗓 Выбрать по календарю", callback_data: "REPORT_PERIOD:PERIOD" }],
       [{ text: "⏳ Ожидающие заявки", callback_data: "REPORT_PERIOD:PENDING" }],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
@@ -1042,27 +1041,6 @@ async function onMessage(message) {
   }
 
    // ADMIN: ждём ввод произвольного периода отчёта
-  if (st.step === "REPORT_WAIT_RANGE") {
-    const rangeText = text;
-    const parsed = parseDateRange(rangeText);
-    if (!parsed) {
-      await sendMessage(
-        chatId,
-        "⚠️ Неверный формат периода.\nВведите в виде: 01.03.2026-31.03.2026",
-        { reply_markup: menuKeyboardForChat(chatId) }
-      );
-      return;
-    }
-
-    const { from, to } = parsed;
-    const scope = st.data.scope || "ADMIN";
-    const masterTgId = st.data.masterTgId || null;
-
-    clearState(chatId);
-    await sendTextReport(chatId, from, to, { scope, masterTgId });
-    return;
-  }
-
   // если шаг неизвестен — сброс
   clearState(chatId);
   await sendMessage(chatId, "⚠️ Сессия сброшена. Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
@@ -1124,20 +1102,9 @@ async function onCallback(cb) {
       const now = new Date();
       const yyyymm = formatYyyymm(now.getFullYear(), now.getMonth() + 1);
       setState(chatId, "REPORT_PICK_START", { scope, masterTgId, yyyymm });
-      await editMessage(chatId, messageId, "📅 Выберите дату начала периода:", {
+      await editMessage(chatId, messageId, "📅 Свой период\n\nШаг 1 из 2 — выберите дату ОТ:", {
         reply_markup: reportCalendarKeyboard("START", yyyymm),
       });
-      return;
-    }
-
-    if (code === "CUSTOM") {
-      setState(chatId, "REPORT_WAIT_RANGE", { scope, masterTgId });
-      await editMessage(
-        chatId,
-        messageId,
-        "📅 Введите период в формате:\n01.03.2026-31.03.2026",
-        { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
-      );
       return;
     }
 
@@ -1159,7 +1126,7 @@ async function onCallback(cb) {
     const st = getState(chatId);
     if (!st || st.step !== "REPORT_PICK_START") return;
     setState(chatId, "REPORT_PICK_START", { ...st.data, yyyymm });
-    await editMessage(chatId, messageId, "📅 Выберите дату начала периода:", {
+    await editMessage(chatId, messageId, "📅 Свой период\n\nШаг 1 из 2 — выберите дату ОТ:", {
       reply_markup: reportCalendarKeyboard("START", yyyymm),
     });
     return;
@@ -1175,8 +1142,9 @@ async function onCallback(cb) {
     const d = parseYyyymmdd(yyyymmdd);
     if (!d) return;
     const fromDate = new Date(d.y, d.mo - 1, d.d);
+    const fromLabel = formatDate(fromDate);
     setState(chatId, "REPORT_PICK_END", { scope, masterTgId, fromTs: fromDate.getTime(), yyyymm: yyyymmdd.slice(0, 6) });
-    await editMessage(chatId, messageId, "📅 Выберите дату окончания периода:", {
+    await editMessage(chatId, messageId, `📅 Свой период\nОТ: ${fromLabel}\n\nШаг 2 из 2 — выберите дату ДО:`, {
       reply_markup: reportCalendarKeyboard("END", yyyymmdd.slice(0, 6)),
     });
     return;
@@ -1187,8 +1155,9 @@ async function onCallback(cb) {
     const yyyymm = data.split(":")[1];
     const st = getState(chatId);
     if (!st || st.step !== "REPORT_PICK_END") return;
+    const fromLabel = st.data.fromTs ? formatDate(new Date(st.data.fromTs)) : "—";
     setState(chatId, "REPORT_PICK_END", { ...st.data, yyyymm });
-    await editMessage(chatId, messageId, "📅 Выберите дату окончания периода:", {
+    await editMessage(chatId, messageId, `📅 Свой период\nОТ: ${fromLabel}\n\nШаг 2 из 2 — выберите дату ДО:`, {
       reply_markup: reportCalendarKeyboard("END", yyyymm),
     });
     return;
@@ -2304,18 +2273,6 @@ function calcPresetPeriod(code) {
 }
 
 // Парсинг произвольного периода "dd.mm.yyyy-dd.mm.yyyy"
-function parseDateRange(input) {
-  const m = input.match(
-    /^(\d{2})\.(\d{2})\.(\d{4})\s*-\s*(\d{2})\.(\d{2})\.(\d{4})$/
-  );
-  if (!m) return null;
-
-  const [, d1, mo1, y1, d2, mo2, y2] = m;
-  const from = startOfDay(new Date(Number(y1), Number(mo1) - 1, Number(d1)));
-  const to = endOfDay(new Date(Number(y2), Number(mo2) - 1, Number(d2)));
-  if (isNaN(from.getTime()) || isNaN(to.getTime()) || from > to) return null;
-  return { from, to };
-}
 
 // Общая фильтрация заявок за период для отчёта
 function getReportItems(from, to, opts = {}) {
