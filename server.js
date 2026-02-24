@@ -449,12 +449,13 @@ function masterArrivalPhotoKeyboard(orderId, order) {
       ]);
       i += 2;
     } else {
-      // Фото — полная ширина строки
-      rows.push([{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }]);
-      // «Без» — отдельная строка, чтобы кнопка фото не обрезалась
+      // Укорачиваем метку в кнопке: убираем префикс FMB
+      const btnLabel = slot.label.replace(/FMB(\d{3})/g, '$1');
+      const row = [{ text: `📷 ${btnLabel}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
       if (!slot.required) {
-        rows.push([{ text: "⏭ Без", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` }]);
+        row.push({ text: "⏭", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
       }
+      rows.push(row);
       i++;
     }
   }
@@ -1667,12 +1668,14 @@ async function onCallback(cb) {
     const label = slot ? slot.label : photoType;
 
     setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
-    await editMessage(
-      chatId,
-      messageId,
-      `📸 ${label}\n\nНажмите 📎 рядом с полем ввода → выберите «Фото» или «Камера» и отправьте снимок.`,
-      { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
-    );
+    // Обновляем клавиатуру без смены текста (тихо)
+    await tg("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: masterArrivalPhotoKeyboard(orderId, order) }).catch(() => {});
+    // Отправляем force_reply — фокусирует поле ввода для ответа
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: `📎 ${label}`,
+      reply_markup: { force_reply: true, input_field_placeholder: "Отправьте фото..." },
+    });
     return;
   }
 
@@ -1689,12 +1692,8 @@ async function onCallback(cb) {
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     if (kb) {
-      await editMessage(
-        chatId,
-        messageId,
-        `⏭ Учтено: без ${skipLabel}. Выберите следующее:`,
-        { reply_markup: kb }
-      );
+      // Тихо обновляем только клавиатуру, не меняя текст сообщения
+      await tg("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: kb }).catch(() => {});
       return;
     }
 
