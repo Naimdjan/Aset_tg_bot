@@ -957,24 +957,6 @@ async function onCallback(cb) {
 
   // MASTER: берёт заявку
   if (data.startsWith("MASTER_ACCEPT:")) {
-    // #region agent log
-    fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'X-Debug-Session-Id':'0e7f15'
-      },
-      body:JSON.stringify({
-        sessionId:'0e7f15',
-        runId:'pre-fix',
-        hypothesisId:'H3',
-        location:'server.js:MASTER_ACCEPT',
-        message:'MASTER_ACCEPT callback received',
-        data:{ rawData:data },
-        timestamp:Date.now()
-      })
-    }).catch(()=>{});
-    // #endregion agent log
     const orderId = data.split(":")[1];
     const order = orders.get(orderId);
     if (!order) {
@@ -1229,24 +1211,6 @@ async function onCallback(cb) {
     const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства / серийного номера", DUT: "датчика DUT" };
     const label = labels[photoType] || "фото";
 
-     // #region agent log
-    fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'X-Debug-Session-Id':'0e7f15'
-      },
-      body:JSON.stringify({
-        sessionId:'0e7f15',
-        runId:'pre-fix',
-        hypothesisId:'H2',
-        location:'server.js:MASTER_PHOTO',
-        message:'MASTER_PHOTO requested',
-        data:{ orderId, photoType, hasDUTOption: !!(order.option && order.option.includes('DUT')) },
-        timestamp:Date.now()
-      })
-    }).catch(()=>{});
-    // #endregion agent log
     setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
     await editMessage(
       chatId,
