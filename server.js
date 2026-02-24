@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const XLSX = require("xlsx");
@@ -15,9 +16,22 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) console.error("❌ BOT_TOKEN not found in environment variables");
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
+// Пароль для доступа к боту (если задан — после /start нужно ввести пароль)
+const BOT_PASSWORD = (process.env.BOT_PASSWORD || "").trim();
+const authorizedChatIds = new Set(); // chatId строкой
+
+function isAuthorized(chatId) {
+  return authorizedChatIds.has(String(chatId));
+}
+function setAuthorized(chatId) {
+  authorizedChatIds.add(String(chatId));
+}
+
 // =============================
+// Главный администратор (получает уведомления, отчёты)
+const MAIN_ADMIN_ID = 7862998301;
+
 const MASTERS = [
-  { tgId: 7862998301, name: "Абдухалим", city: "Душанбе" },
   { tgId: 7692783802, name: "Иброхимчон", city: "Худжанд" },
   { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" },
 ];
@@ -193,6 +207,22 @@ function masterOrderKeyboard(orderId) {
   };
 }
 
+// Три кнопки для фото по прибытии клиента (показываем только то, что ещё не загружено)
+function masterArrivalPhotoKeyboard(orderId, order) {
+  const row = [];
+  if (!order.carNumberPhotoId) {
+    row.push({ text: "📷 Фото номера", callback_data: `MASTER_PHOTO:${orderId}:PLATE` });
+  }
+  if (!order.odometerPhotoId) {
+    row.push({ text: "📷 Фото пробега", callback_data: `MASTER_PHOTO:${orderId}:ODOMETER` });
+  }
+  if (!order.devicePhotoId) {
+    row.push({ text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` });
+  }
+  if (row.length === 0) return null;
+  return { inline_keyboard: [row] };
+}
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -220,37 +250,22 @@ function parseYyyymmdd(yyyymmdd) {
   return { y, mo, d };
 }
 
-function monthLabelRu(y, mo) {
-  const months = [
-    "Январь",
-    "Февраль",
-    "Март",
-    "Апрель",
-    "Май",
-    "Июнь",
-    "Июль",
-    "Август",
-    "Сентябрь",
-    "Октябрь",
-    "Ноябрь",
-    "Декабрь",
-  ];
-  return `${months[mo - 1]} ${y}`;
+const MONTH_SHORT = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"];
+
+function monthLabelShort(y, mo) {
+  return `${MONTH_SHORT[mo - 1]} ${y}`;
 }
 
-// Календарь для выбора даты визита мастером
+// Компактный календарь: без заголовка дней недели, короткое название месяца
 function masterCalendarKeyboard(orderId, yyyymm) {
   const parsed = parseYyyymm(yyyymm);
-  const y = parsed?.y;
-  const mo = parsed?.mo;
   const now = new Date();
-  const year = y || now.getFullYear();
-  const month = mo || now.getMonth() + 1;
+  const year = parsed?.y || now.getFullYear();
+  const month = parsed?.mo || now.getMonth() + 1;
 
   const first = new Date(year, month - 1, 1);
   const daysInMonth = new Date(year, month, 0).getDate();
-  // Monday-based index: 0..6 (Mon..Sun)
-  const jsDow = first.getDay(); // 0 Sun .. 6 Sat
+  const jsDow = first.getDay();
   const dow = (jsDow + 6) % 7;
 
   const prevMonth = new Date(year, month - 2, 1);
@@ -260,19 +275,9 @@ function masterCalendarKeyboard(orderId, yyyymm) {
 
   const rows = [];
   rows.push([
-    { text: "«", callback_data: `MN:${orderId}:${prevYyyymm}` },
-    { text: monthLabelRu(year, month), callback_data: "NOOP" },
-    { text: "»", callback_data: `MN:${orderId}:${nextYyyymm}` },
-  ]);
-
-  rows.push([
-    { text: "Пн", callback_data: "NOOP" },
-    { text: "Вт", callback_data: "NOOP" },
-    { text: "Ср", callback_data: "NOOP" },
-    { text: "Чт", callback_data: "NOOP" },
-    { text: "Пт", callback_data: "NOOP" },
-    { text: "Сб", callback_data: "NOOP" },
-    { text: "Вс", callback_data: "NOOP" },
+    { text: "‹", callback_data: `MN:${orderId}:${prevYyyymm}` },
+    { text: monthLabelShort(year, month), callback_data: "NOOP" },
+    { text: "›", callback_data: `MN:${orderId}:${nextYyyymm}` },
   ]);
 
   let day = 1;
@@ -280,11 +285,11 @@ function masterCalendarKeyboard(orderId, yyyymm) {
     const row = [];
     for (let i = 0; i < 7; i++) {
       if (week === 0 && i < dow) {
-        row.push({ text: " ", callback_data: "NOOP" });
+        row.push({ text: "·", callback_data: "NOOP" });
         continue;
       }
       if (day > daysInMonth) {
-        row.push({ text: " ", callback_data: "NOOP" });
+        row.push({ text: "·", callback_data: "NOOP" });
         continue;
       }
       const yyyymmdd = `${year}${pad2(month)}${pad2(day)}`;
@@ -311,18 +316,19 @@ function masterHourKeyboard(orderId, yyyymmdd) {
       }))
     );
   }
-  rows.push([{ text: "⬅️ Назад к дате", callback_data: `MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
+  rows.push([{ text: "⬅ Дата", callback_data: `MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
 }
 
+// Минуты — один столбец (как список по скроллу)
 function masterMinuteKeyboard(orderId, yyyymmdd, hh) {
   const mins = ["00", "15", "30", "45"];
-  const rows = [
-    mins.map((mm) => ({ text: mm, callback_data: `MM:${orderId}:${yyyymmdd}:${hh}:${mm}` })),
-    [{ text: "⬅️ Назад к часам", callback_data: `MBH:${orderId}:${yyyymmdd}` }],
-    [{ text: "❌ Отмена", callback_data: "CANCEL" }],
-  ];
+  const rows = mins.map((mm) => [
+    { text: `${hh}:${mm}`, callback_data: `MM:${orderId}:${yyyymmdd}:${hh}:${mm}` },
+  ]);
+  rows.push([{ text: "⬅ Час", callback_data: `MBH:${orderId}:${yyyymmdd}` }]);
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
 }
 
@@ -374,6 +380,32 @@ app.post("/telegram/webhook", async (req, res) => {
 async function onMessage(message) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
+
+  // Если включён пароль — проверяем доступ
+  if (BOT_PASSWORD) {
+    const st = getState(chatId);
+    if (!isAuthorized(chatId)) {
+      if (text === "/start") {
+        setState(chatId, "WAIT_PASSWORD", {});
+        await sendMessage(chatId, "🔐 Введите пароль для доступа к боту:");
+        return;
+      }
+      if (st && st.step === "WAIT_PASSWORD") {
+        if (text === BOT_PASSWORD) {
+          setAuthorized(chatId);
+          clearState(chatId);
+          await sendMessage(chatId, "✅ Доступ разрешён. Меню активировано.", {
+            reply_markup: menuKeyboardForChat(chatId),
+          });
+          return;
+        }
+        await sendMessage(chatId, "❌ Неверный пароль. Нажмите /start и введите пароль снова.");
+        return;
+      }
+      await sendMessage(chatId, "🔐 Доступ закрыт. Введите /start и укажите пароль.");
+      return;
+    }
+  }
 
   // Команды оставим, но меню выдаём без /start
   if (text === "/start") {
@@ -501,13 +533,10 @@ async function onMessage(message) {
 
   // MASTER: выбор времени делается через календарь/часы (см. callback-обработчики MN/MD/MH/MM)
 
-  // MASTER: отправка фото номера машины, пробега и устройства
-  if (
-    st.step === "MASTER_WAIT_PHOTO_PLATE" ||
-    st.step === "MASTER_WAIT_PHOTO_ODOMETER" ||
-    st.step === "MASTER_WAIT_PHOTO_DEVICE"
-  ) {
+  // MASTER: отправка фото по кнопке (номер / пробег / устройство)
+  if (st.step === "MASTER_WAIT_PHOTO") {
     const orderId = st.data.orderId;
+    const photoType = st.data.photoType;
     const order = orders.get(orderId);
     if (!order || order.masterTgId !== chatId) {
       clearState(chatId);
@@ -526,56 +555,41 @@ async function onMessage(message) {
     }
 
     const fileId = photos[photos.length - 1].file_id;
+    if (photoType === "PLATE") order.carNumberPhotoId = fileId;
+    else if (photoType === "ODOMETER") order.odometerPhotoId = fileId;
+    else if (photoType === "DEVICE") order.devicePhotoId = fileId;
 
-    if (st.step === "MASTER_WAIT_PHOTO_PLATE") {
-      order.carNumberPhotoId = fileId;
-      setState(chatId, "MASTER_WAIT_PHOTO_ODOMETER", { orderId });
-      await sendMessage(chatId, "📸 Теперь отправьте фото пробега спидометра.", {
-        reply_markup: masterMenuReplyKeyboard(),
-      });
-      return;
-    }
-
-    if (st.step === "MASTER_WAIT_PHOTO_ODOMETER") {
-      order.odometerPhotoId = fileId;
-      setState(chatId, "MASTER_WAIT_PHOTO_DEVICE", { orderId });
-      await sendMessage(chatId, "📸 Теперь отправьте фото устройства / серийного номера.", {
-        reply_markup: masterMenuReplyKeyboard(),
-      });
-      return;
-    }
-
-    if (st.step === "MASTER_WAIT_PHOTO_DEVICE") {
-      order.devicePhotoId = fileId;
-      order.status = "DONE";
-
+    const kb = masterArrivalPhotoKeyboard(orderId, order);
+    if (kb) {
       clearState(chatId);
-
-      await sendMessage(chatId, `✅ Данные по заявке #${order.id} сохранены.`, {
-        reply_markup: masterMenuReplyKeyboard(),
+      await sendMessage(chatId, "✅ Фото сохранено. Выберите следующее или отправьте оставшиеся:", {
+        reply_markup: kb,
       });
-
-      // Уведомление администратору + пересылка фото
-      if (order.adminChatId) {
-        await sendMessage(
-          order.adminChatId,
-          `✅ Клиент по заявке #${order.id} обслужен.\n` +
-            `👷 Мастер: ${order.masterName}\n` +
-            `🚗/🏢: ${logisticsLabel(order)}`
-        );
-
-        if (order.carNumberPhotoId) {
-          await sendPhoto(order.adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
-        }
-        if (order.odometerPhotoId) {
-          await sendPhoto(order.adminChatId, order.odometerPhotoId, "📷 Пробег спидометра");
-        }
-        if (order.devicePhotoId) {
-          await sendPhoto(order.adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
-        }
-      }
-
       return;
+    }
+
+    order.status = "DONE";
+    clearState(chatId);
+
+    await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены.`, {
+      reply_markup: masterMenuReplyKeyboard(),
+    });
+
+    const adminChatId = order.adminChatId || MAIN_ADMIN_ID;
+    await sendMessage(
+      adminChatId,
+      `✅ Клиент по заявке #${order.id} обслужен.\n` +
+        `👷 Мастер: ${order.masterName}\n` +
+        `🚗/🏢: ${logisticsLabel(order)}`
+    );
+    if (order.carNumberPhotoId) {
+      await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
+    }
+    if (order.odometerPhotoId) {
+      await sendPhoto(adminChatId, order.odometerPhotoId, "📷 Пробег спидометра");
+    }
+    if (order.devicePhotoId) {
+      await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
     }
   }
 
@@ -612,6 +626,11 @@ async function onCallback(cb) {
   const data = cb.data || "";
 
   await answerCb(cb.id);
+
+  if (BOT_PASSWORD && !isAuthorized(chatId)) {
+    await sendMessage(chatId, "🔐 Доступ закрыт. Введите /start и укажите пароль.");
+    return;
+  }
 
   // Cancel — на шаге комментария не сбрасываем заявку: пользователь может ещё ввести текст
   if (data === "CANCEL") {
@@ -912,7 +931,7 @@ async function onCallback(cb) {
     return;
   }
 
-  // MASTER: отмечает приезд клиента
+  // MASTER: отмечает приезд клиента — показываем три кнопки для фото
   if (data.startsWith("MASTER_CLIENT_ARRIVED:")) {
     const orderId = data.split(":")[1];
     const order = orders.get(orderId);
@@ -934,14 +953,9 @@ async function onCallback(cb) {
     await editMessage(
       chatId,
       messageId,
-      `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n` +
-        "Далее по шагам отправьте необходимые фото в чат.",
+      `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nВыберите, какое фото отправить:`,
+      { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
     );
-
-    setState(chatId, "MASTER_WAIT_PHOTO_PLATE", { orderId });
-    await sendMessage(chatId, "📸 Сначала отправьте фото номера автомобиля.", {
-      reply_markup: masterMenuReplyKeyboard(),
-    });
 
     if (order.adminChatId) {
       await sendMessage(
@@ -951,6 +965,24 @@ async function onCallback(cb) {
       );
     }
 
+    return;
+  }
+
+  // MASTER: нажал кнопку «Фото номера / пробега / устройства» — ждём отправку фото
+  if (data.startsWith("MASTER_PHOTO:")) {
+    const [, orderId, photoType] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+
+    const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства / серийного номера" };
+    const label = labels[photoType] || "фото";
+    setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
+    await editMessage(
+      chatId,
+      messageId,
+      `📸 Отправьте фото ${label} в чат.`,
+      { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
+    );
     return;
   }
 
@@ -1171,6 +1203,12 @@ function formatDate(d) {
   return `${dd}.${mm}.${yyyy}`;
 }
 
+function formatTime(d) {
+  const h = String(d.getHours()).padStart(2, "0");
+  const m = String(d.getMinutes()).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
 // Предустановленные периоды
 function calcPresetPeriod(code) {
   const now = new Date();
@@ -1312,6 +1350,7 @@ function buildExcelReport(from, to, opts = {}) {
     [
       "№",
       "Дата",
+      "Время",
       "Тип",
       "Вид монтажа",
       "Город",
@@ -1325,9 +1364,11 @@ function buildExcelReport(from, to, opts = {}) {
   ];
 
   items.forEach((o, i) => {
+    const d = o.createdAt ? new Date(o.createdAt) : null;
     rows.push([
       i + 1,
-      o.createdAt ? formatDate(new Date(o.createdAt)) : "",
+      d ? formatDate(d) : "",
+      d ? formatTime(d) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
       o.type === "INSTALL" ? (o.option || "—") : "—",
       o.city || "—",
