@@ -665,6 +665,17 @@ function qtyKeyboard(orderId) {
   };
 }
 
+// Клавиатура оценки времени установки (при 5+ устройств)
+function installTimeKeyboard(orderId) {
+  return {
+    inline_keyboard: [
+      [1, 2, 3, 4].map(h => ({ text: `${h} ч`, callback_data: `INST_TIME:${orderId}:${h}` })),
+      [5, 6, 8, 10].map(h => ({ text: `${h} ч`, callback_data: `INST_TIME:${orderId}:${h}` })),
+      [{ text: "⏩ Пропустить", callback_data: `INST_TIME:${orderId}:0` }],
+    ],
+  };
+}
+
 // =============================
 // Routes
 // =============================
@@ -1002,17 +1013,17 @@ async function onMessage(message) {
     const kb = masterArrivalPhotoKeyboard(orderId, order);
 
     if (kb) {
-      // Ещё есть слоты — редактируем то же сообщение заявки
+      // Убираем клавиатуру из старого сообщения
       if (origMsgId) {
         await tg("editMessageText", {
           chat_id: chatId,
           message_id: origMsgId,
-          text: `📷 Заявка #${order.id} — ${photoLabel} ✅\n\nВыберите следующее фото:`,
-          reply_markup: kb,
+          text: `✅ ${photoLabel} — принято (заявка #${order.id})`,
+          reply_markup: { inline_keyboard: [] },
         }).catch(() => {});
-      } else {
-        await sendMessage(chatId, `✅ Фото (${photoLabel}) принято. Выберите следующее:`, { reply_markup: kb });
       }
+      // Отправляем НОВОЕ сообщение с кнопками НИЖЕ фото
+      await sendMessage(chatId, `📷 Заявка #${order.id} — выберите следующее:`, { reply_markup: kb });
       return;
     }
 
@@ -1621,21 +1632,29 @@ async function onCallback(cb) {
     order.status = "CLIENT_ARRIVED";
 
     const photoKb = masterArrivalPhotoKeyboard(orderId, order);
+    const deviceUnitCount = photoKb
+      ? getPhotoSlots(order).filter(s => s.photoType === "device").length
+      : 0;
 
-    if (photoKb) {
+    if (photoKb && deviceUnitCount > 5) {
+      // Много устройств — сначала просим оценку времени
       await editMessage(
-        chatId,
-        messageId,
-        `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nНажмите нужную кнопку ниже, затем 📎 (скрепка) → «Фото» или «Камера»:`,
+        chatId, messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл.\n\n⚠️ Установок: ${deviceUnitCount} устр. Сколько времени займёт установка?`,
+        { reply_markup: installTimeKeyboard(orderId) }
+      );
+    } else if (photoKb) {
+      await editMessage(
+        chatId, messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nНажмите нужную кнопку ниже:`,
         { reply_markup: photoKb }
       );
     } else {
       // Только аксессуары — фото не нужны, сразу показываем «Выполнено»
       setState(chatId, "MASTER_WAIT_DONE", { orderId });
       await editMessage(
-        chatId,
-        messageId,
-        `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nФото не требуются. По завершению работ нажмите «✅ Выполнено».`,
+        chatId, messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл.\n\nФото не требуются. По завершению работ нажмите «✅ Выполнено».`,
         {
           reply_markup: {
             inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
@@ -1652,6 +1671,44 @@ async function onCallback(cb) {
       );
     }
 
+    return;
+  }
+
+  // MASTER: оценил время установки (при 5+ устройств)
+  if (data.startsWith("INST_TIME:")) {
+    const [, orderId, hoursStr] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+    await answerCb(cb.id);
+
+    const hours = Number(hoursStr);
+    if (hours > 0) {
+      order.estimatedInstallHours = hours;
+      const note = `🛠 Мастер ${order.masterName}: заявка #${order.id} (${order.phone}) — оценка установки ~${hours} ч.`;
+      if (order.adminChatId) {
+        await safeSend(order.adminChatId, note);
+      }
+      if (String(order.adminChatId) !== String(SUPER_ADMIN_ID)) {
+        await safeSend(SUPER_ADMIN_ID, note);
+      }
+    }
+
+    const photoKb = masterArrivalPhotoKeyboard(orderId, order);
+    if (photoKb) {
+      const estLine = hours > 0 ? `⏱ Оценка: ~${hours} ч.\n\n` : "";
+      await editMessage(
+        chatId, messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\n${estLine}Нажмите нужную кнопку ниже:`,
+        { reply_markup: photoKb }
+      );
+    } else {
+      setState(chatId, "MASTER_WAIT_DONE", { orderId });
+      await editMessage(
+        chatId, messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл.\n\nФото не требуются. По завершению работ нажмите «✅ Выполнено».`,
+        { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } }
+      );
+    }
     return;
   }
 
@@ -1842,9 +1899,10 @@ async function onCallback(cb) {
       adminSuggestedTimeText: "",
       confirmedTimeText: "",
       actualArrivalAt: null,
-      acceptedAt: null,          // когда мастер принял заявку (ACCEPTED_BY_MASTER)
-      lastReminderAt: null,      // когда последний раз отправлено напоминание
-      reminderCount: 0,          // сколько напоминаний уже отправлено
+      acceptedAt: null,              // когда мастер принял заявку
+      lastReminderAt: null,          // когда последний раз отправлено напоминание
+      reminderCount: 0,              // сколько напоминаний отправлено
+      estimatedInstallHours: null,   // оценка мастера: сколько часов займёт установка
 
       devicePhotos: {},   // { slotKey: fileId|"SKIPPED" }
 
@@ -2733,12 +2791,17 @@ async function checkOrderReminders() {
 
     const acceptedTs = new Date(order.acceptedAt).getTime();
     const elapsed = now - acceptedTs;
-    if (elapsed < THREE_HOURS_MS) continue; // ещё не прошло 3 часа
+
+    // Если мастер указал оценку — первое напоминание через estimatedInstallHours+30мин, но не раньше 3ч
+    const estMs = order.estimatedInstallHours
+      ? Math.max(order.estimatedInstallHours * 60 * 60 * 1000 + THIRTY_MIN_MS, THREE_HOURS_MS)
+      : THREE_HOURS_MS;
+    if (elapsed < estMs) continue;
 
     const lastRemTs = order.lastReminderAt ? new Date(order.lastReminderAt).getTime() : 0;
     const sinceLastRem = now - lastRemTs;
 
-    // Первое напоминание — после 3 ч; следующие — каждые 30 мин
+    // Первое напоминание — после estMs; следующие — каждые 30 мин
     if (lastRemTs !== 0 && sinceLastRem < THIRTY_MIN_MS) continue;
 
     order.lastReminderAt = new Date().toISOString();
@@ -2748,6 +2811,9 @@ async function checkOrderReminders() {
     const minElapsed   = Math.floor((elapsed % (60 * 60 * 1000)) / 60000);
     const timeStr      = hoursElapsed > 0 ? `${hoursElapsed}ч ${minElapsed}мин` : `${minElapsed}мин`;
     const reminder     = order.reminderCount;
+    const estNote      = order.estimatedInstallHours
+      ? `\n📌 Оценка мастера была: ~${order.estimatedInstallHours} ч.`
+      : "";
 
     // Уведомление мастеру
     safeSend(
@@ -2755,7 +2821,7 @@ async function checkOrderReminders() {
       `⏰ Напоминание #${reminder}: заявка #${order.id} ещё активна!\n` +
       `📊 Статус: ${statusLabel(order.status)}\n` +
       `📞 Клиент: ${order.phone}\n` +
-      `⏱ Прошло: ${timeStr} с момента принятия\n\n` +
+      `⏱ Прошло: ${timeStr} с момента принятия${estNote}\n\n` +
       `Завершите работы или свяжитесь с администратором.`
     );
 
@@ -2767,7 +2833,7 @@ async function checkOrderReminders() {
       `👷 Мастер: ${order.masterName}\n` +
       `📊 Статус: ${statusLabel(order.status)}\n` +
       `📞 Клиент: ${order.phone}\n` +
-      `⏱ Прошло: ${timeStr} с момента принятия`
+      `⏱ Прошло: ${timeStr} с момента принятия${estNote}`
     );
     if (String(adminId) !== String(SUPER_ADMIN_ID)) {
       safeSend(
@@ -2776,7 +2842,7 @@ async function checkOrderReminders() {
         `👷 Мастер: ${order.masterName}\n` +
         `📊 Статус: ${statusLabel(order.status)}\n` +
         `📞 Клиент: ${order.phone}\n` +
-        `⏱ Прошло: ${timeStr} с момента принятия`
+        `⏱ Прошло: ${timeStr} с момента принятия${estNote}`
       );
     }
   }
