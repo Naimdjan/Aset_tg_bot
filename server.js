@@ -38,7 +38,6 @@ function setAuthorized(chatId) {
 // Роли: супер-админ и админ для общения с мастерами
 const SUPER_ADMIN_ID = 7862998301;   // супер-админ: все права, все уведомления, весь чат
 const ADMIN_CHAT_ID = 1987607156;    // админ: общается с мастерами, но не видит чат супер-админа
-const MAIN_ADMIN_ID = SUPER_ADMIN_ID; // для совместимости со старым кодом
 
 const MASTERS = [
   { tgId: 8095234574, name: "Иброхимчон", city: "Худжанд" },
@@ -109,9 +108,6 @@ function getPhotoSlots(order) {
     }
   }
 
-  // #region agent log
-  fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e7f15'},body:JSON.stringify({sessionId:'0e7f15',location:'server.js:getPhotoSlots',message:'slots',data:{opts,dutPaired,slots:slots.map(s=>s.key)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   return slots;
 }
 
@@ -859,17 +855,13 @@ async function onMessage(message) {
     }
 
     const fileId = photos[photos.length - 1].file_id;
-    const adminChatIdImm = order.adminChatId || MAIN_ADMIN_ID;
+    const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
 
     // Все фото сохраняются в devicePhotos по ключу слота
     if (!order.devicePhotos) order.devicePhotos = {};
     order.devicePhotos[photoType] = fileId;
     const slot = getPhotoSlots(order).find(s => s.key === photoType);
     const photoLabel = slot ? slot.label : photoType;
-
-    // #region agent log
-    fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e7f15'},body:JSON.stringify({sessionId:'0e7f15',location:'server.js:MASTER_WAIT_PHOTO',message:'photo saved',data:{photoType,photoLabel,keys:Object.keys(order.devicePhotos)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
     // Немедленно пересылаем фото администратору
     safeSend(adminChatIdImm, `📷 Мастер ${order.masterName || ""}: ${photoLabel} (#${order.id})`);
@@ -894,7 +886,7 @@ async function onMessage(message) {
     if (warnMsg) {
       await sendMessage(chatId, warnMsg);
       // Немедленно информируем администратора
-      const adminChatIdW = order.adminChatId || MAIN_ADMIN_ID;
+      const adminChatIdW = order.adminChatId || SUPER_ADMIN_ID;
       safeSend(adminChatIdW, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
       if (String(adminChatIdW) !== String(SUPER_ADMIN_ID)) {
         safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
@@ -1459,7 +1451,7 @@ async function onCallback(cb) {
     const warnSkip = getMissingPhotoWarning(order);
     if (warnSkip) {
       await sendMessage(chatId, warnSkip);
-      const adminChatIdWS = order.adminChatId || MAIN_ADMIN_ID;
+      const adminChatIdWS = order.adminChatId || SUPER_ADMIN_ID;
       safeSend(adminChatIdWS, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnSkip}`);
       if (String(adminChatIdWS) !== String(SUPER_ADMIN_ID)) {
         safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnSkip}`);
@@ -1488,7 +1480,7 @@ async function onCallback(cb) {
     await editMessage(chatId, messageId, "✅ Выполнено.", { reply_markup: { inline_keyboard: [] } });
     await sendMessage(chatId, "✅ Готово.", { reply_markup: masterMenuReplyKeyboard() });
 
-    const adminChatId = order.adminChatId || MAIN_ADMIN_ID;
+    const adminChatId = order.adminChatId || SUPER_ADMIN_ID;
     const doneCloseKb = { inline_keyboard: [[{ text: "🔒 Закрыть заявку", callback_data: `ADMIN_CLOSE:${order.id}` }]] };
     const doneMsg =
       `✅ Заявка #${order.id} выполнена.\n` +
@@ -1593,17 +1585,7 @@ async function onCallback(cb) {
       confirmedTimeText: "",
       actualArrivalAt: null,
 
-      carNumberPhotoId: null,
-      odometerPhotoId: null,
-      devicePhotoId: null,
-      carNumberSkipped: false,
-      odometerSkipped: false,
-      deviceSkipped: false,
-
-      dutPhotoId: null,
-      dutSkipped: false,
-
-      devicePhotos: {},   // { "0": fileId|"SKIPPED", "1": ... }
+      devicePhotos: {},   // { slotKey: fileId|"SKIPPED" }
 
       options: [],
       deviceQuantities: {},  // { "FMB920": 2, "FMB125+DUT": 1 }
