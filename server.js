@@ -63,7 +63,7 @@ const ACCESSORIES = new Set(OPTIONS_ACCESSORIES);
 //  - Каждая единица устройства: device (обяз.) + [dut (обяз.)] + odometer + plate
 // Ключ: "{DeviceName}_{unitIdx}_{photoType}"
 function getPhotoSlots(order) {
-  const opts = order.options?.length ? order.options : (order.option ? [order.option] : []);
+  const opts = order.options?.length ? order.options : [];
   if (!opts.length) return [];
 
   const hasFMB125 = opts.includes("FMB125");
@@ -120,13 +120,9 @@ const orders = new Map();    // orderId -> order
 const userState = new Map(); // chatId -> { step, data }
 const dedupe = new Map();    // update_id -> ts
 
-function nowTs() {
-  return Date.now();
-}
-
 function cleanupDedupe() {
-  const ttl = 60 * 1000; // 1 minute
-  const t = nowTs();
+  const ttl = 60 * 1000;
+  const t = Date.now();
   for (const [k, v] of dedupe.entries()) {
     if (t - v > ttl) dedupe.delete(k);
   }
@@ -135,7 +131,7 @@ function cleanupDedupe() {
 // Удаляем закрытые/выполненные заявки старше 7 дней (защита от утечки памяти)
 function cleanupOldOrders() {
   const maxAge = 7 * 24 * 60 * 60 * 1000;
-  const t = nowTs();
+  const t = Date.now();
   for (const [id, order] of orders.entries()) {
     const terminal = ["CLOSED", "DECLINED_BY_MASTER"].includes(order.status);
     const ts = order.closedAt || order.completedAt || order.createdAt;
@@ -692,7 +688,7 @@ app.post("/telegram/webhook", async (req, res) => {
     // DEDUPE update_id
     if (typeof update.update_id === "number") {
       if (dedupe.has(update.update_id)) return;
-      dedupe.set(update.update_id, nowTs());
+      dedupe.set(update.update_id, Date.now());
     }
 
     if (update.message) await onMessage(update.message);
@@ -802,13 +798,13 @@ async function onMessage(message) {
     }
   }
 
-  if (text === "📋 Новая заявка" || text === "📝 Новая заявка (монтаж)") {
+  if (text === "📋 Новая заявка") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "INSTALL" });
     await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
     return;
   }
 
-  if (text === "🔧 Ремонт / другое" || text === "🧰 Ремонт / другое") {
+  if (text === "🔧 Ремонт / другое") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "REPAIR" });
     await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
     return;
@@ -1686,7 +1682,6 @@ async function onCallback(cb) {
     const [, orderId, hoursStr] = data.split(":");
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
-    await answerCb(cb.id);
 
     const hours = Number(hoursStr);
     if (hours > 0) {
@@ -1908,7 +1903,6 @@ async function onCallback(cb) {
       logistics: null,                  // VISIT | COME
       address: "",                      // адрес при VISIT
 
-      option: null,                     // для INSTALL
       adminComment: "",
 
       masterSuggestedTimeText: "",
@@ -1919,7 +1913,6 @@ async function onCallback(cb) {
       lastReminderAt: null,          // когда последний раз отправлено напоминание
       reminderCount: 0,              // сколько напоминаний отправлено
       estimatedInstallHours: null,   // оценка мастера: сколько часов займёт установка
-      masterPhotoMsgIds: [],         // message_id фото мастера — удаляем после передачи
 
       devicePhotos: {},   // { slotKey: fileId|"SKIPPED" }
 
@@ -2124,7 +2117,6 @@ async function onCallback(cb) {
     }
 
     order.options = selectedOpts.map(i => OPTIONS[i]);
-    order.option = order.options[0]; // backward compat
 
     // Запрашиваем количество для первого устройства
     setState(chatId, "ADMIN_WAIT_QTY", { orderId, qtyIdx: 0, quantities: {} });
@@ -2514,7 +2506,7 @@ function buildMasterSummaryRows(items) {
     byMaster[name].total += 1;
     if (o.type === "INSTALL") {
       byMaster[name].installs += 1;
-      const oOpts = o.options?.length ? o.options : (o.option ? [o.option] : []);
+      const oOpts = o.options?.length ? o.options : [];
       for (const opt of oOpts) {
         const qty = o.deviceQuantities?.[opt] || 1;
         if (byMaster[name][opt] !== undefined) byMaster[name][opt] += qty;
@@ -2603,7 +2595,7 @@ function buildExcelReport(from, to, opts = {}) {
   const installs = items.filter((o) => o.type === "INSTALL");
   const byOption = {};
   for (const o of installs) {
-    const opts2 = o.options && o.options.length ? o.options : (o.option ? [o.option] : ["—"]);
+    const opts2 = o.options?.length ? o.options : ["—"];
     for (const opt of opts2) {
       const qty = o.deviceQuantities?.[opt] || 1;
       if (!byOption[opt]) byOption[opt] = { orders: 0, devices: 0 };
@@ -2690,7 +2682,7 @@ function buildExcelReportPending(opts = {}) {
   const installs = items.filter((o) => o.type === "INSTALL");
   const byOption = {};
   for (const o of installs) {
-    const opts2 = o.options?.length ? o.options : (o.option ? [o.option] : ["—"]);
+    const opts2 = o.options?.length ? o.options : ["—"];
     for (const opt of opts2) {
       const qty = o.deviceQuantities?.[opt] || 1;
       if (!byOption[opt]) byOption[opt] = { orders: 0, devices: 0 };
@@ -2714,7 +2706,7 @@ function buildExcelReportPending(opts = {}) {
 
 function optionsLabel(order) {
   if (order.type !== "INSTALL") return "";
-  const opts = order.options && order.options.length ? order.options : (order.option ? [order.option] : []);
+  const opts = order.options?.length ? order.options : [];
   if (!opts.length) return "-";
   if (order.deviceQuantities && Object.keys(order.deviceQuantities).length) {
     return opts.map(o => `${o} ×${order.deviceQuantities[o] || 1}`).join(", ");
