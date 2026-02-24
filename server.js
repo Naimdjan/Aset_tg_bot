@@ -35,13 +35,14 @@ function setAuthorized(chatId) {
 }
 
 // =============================
-// Главный администратор (получает уведомления, отчёты)
-const MAIN_ADMIN_ID = 7862998301;
+// Роли: супер-админ и админ для общения с мастерами
+const SUPER_ADMIN_ID = 7862998301;   // супер-админ: все права, все уведомления, весь чат
+const ADMIN_CHAT_ID = 1987607156;    // админ: общается с мастерами, но не видит чат супер-админа
+const MAIN_ADMIN_ID = SUPER_ADMIN_ID; // для совместимости со старым кодом
 
 const MASTERS = [
   { tgId: 7692783802, name: "Иброхимчон", city: "Худжанд" },
   { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" },
-  { tgId: 1987607156, name: "Азизчон", city: "Худжанд" },
 ];
 
 // Опции (выбирает АДМИН)
@@ -523,6 +524,13 @@ async function onMessage(message) {
       });
       return;
     } else {
+      // только назначенный админ или супер-админ могут начинать чат с мастерами
+      if (String(chatId) !== String(ADMIN_CHAT_ID) && String(chatId) !== String(SUPER_ADMIN_ID)) {
+        await sendMessage(chatId, "⚠️ У вас нет прав для общения с мастерами.", {
+          reply_markup: menuKeyboardForChat(chatId),
+        });
+        return;
+      }
       // админ: сначала выбрать мастера
       setState(chatId, "ADMIN_CHAT_PICK_MASTER", {});
       await sendMessage(chatId, "💬 Выберите мастера для чата:", {
@@ -559,6 +567,13 @@ async function onMessage(message) {
     const masterName = master ? master.name : "мастер";
     if (text) {
       await sendMessage(masterTgId, `💬 Сообщение от админа:\n${text}`);
+      // супер-админу дублируем чат администратора с мастером (чтобы он всё видел)
+      if (String(chatId) === String(ADMIN_CHAT_ID)) {
+        await sendMessage(
+          SUPER_ADMIN_ID,
+          `📡 Чат админа с мастером ${masterName} (ID мастера: ${masterTgId}):\n${text}`
+        );
+      }
       await sendMessage(chatId, `✅ Отправлено ${masterName}.`, { reply_markup: adminMenuReplyKeyboard() });
     }
     return;
@@ -569,10 +584,18 @@ async function onMessage(message) {
     const master = MASTERS.find((m) => String(m.tgId) === String(chatId));
     const masterName = master ? master.name : "Мастер";
     if (text) {
+      // основное общение мастера идёт с обычным админом
       await sendMessage(
-        MAIN_ADMIN_ID,
-        `💬 Сообщение от мастера ${masterName} (ID: ${chatId}):\n${text}`
+        ADMIN_CHAT_ID,
+        `💬 Сообщение от мастера ${masterName}:\n${text}`
       );
+      // супер-админ видит копию диалога, но без ID
+      if (String(SUPER_ADMIN_ID) !== String(ADMIN_CHAT_ID)) {
+        await sendMessage(
+          SUPER_ADMIN_ID,
+          `📡 Копия сообщения мастера ${masterName} администратору:\n${text}`
+        );
+      }
       await sendMessage(chatId, "✅ Отправлено админу.", { reply_markup: masterMenuReplyKeyboard() });
     }
     return;
@@ -580,7 +603,14 @@ async function onMessage(message) {
 
   // ADMIN: ждём телефон
   if (st.step === "ADMIN_WAIT_PHONE") {
-    st.data.phone = text;
+    const phoneDigits = text.replace(/\D/g, "");
+    if (!/^\d{9}$/.test(phoneDigits)) {
+      await sendMessage(chatId, "⚠️ Номер телефона должен содержать строго 9 цифр (без кода страны). Попробуйте ещё раз.", {
+        reply_markup: adminMenuReplyKeyboard(),
+      });
+      return;
+    }
+    st.data.phone = phoneDigits;
     setState(chatId, "ADMIN_WAIT_MASTER", st.data);
     await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", {
       reply_markup: adminMenuReplyKeyboard(),
@@ -683,11 +713,15 @@ async function onMessage(message) {
 
     // Все фото/пропуски собраны — показываем кнопку «Выполнено»
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
-    await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены. Нажмите «✅ Выполнено» для завершения.`, {
+    await sendMessage(
+      chatId,
+      `✅ Все данные по заявке #${order.id} сохранены.\nПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».`,
+      {
       reply_markup: {
         inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
       },
-    });
+    }
+    );
     return;
   }
 
@@ -1711,7 +1745,7 @@ function buildExcelReport(from, to, opts = {}) {
       "Город",
       "Мастер",
       "Логистика",
-      "Адрес",
+      "Адрес выезда",
       "Телефон",
       "Комментарий",
       "Статус",
