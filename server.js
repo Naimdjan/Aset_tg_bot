@@ -74,12 +74,12 @@ function getPhotoSlots(order) {
 
   const addUnitSlots = (name, unitIdx, hasDut) => {
     const n = unitIdx + 1;
-    slots.push({ key: `${name}_${unitIdx}_device`,   label: `Фото ${name}-${n}`,         deviceName: name, photoType: "device",   unitIdx, required: true  });
+    slots.push({ key: `${name}_${unitIdx}_device`,   label: `${name}-${n}`,    deviceName: name, photoType: "device",   unitIdx, required: true  });
     if (hasDut) {
-      slots.push({ key: `${name}_${unitIdx}_dut`,    label: `DUT для ${name}-${n}`,       deviceName: name, photoType: "dut",      unitIdx, required: true  });
+      slots.push({ key: `${name}_${unitIdx}_dut`,    label: `DUT-${n}`,        deviceName: name, photoType: "dut",      unitIdx, required: true  });
     }
-    slots.push({ key: `${name}_${unitIdx}_odometer`, label: `Пробег для ${name}-${n}`,   deviceName: name, photoType: "odometer", unitIdx, required: false });
-    slots.push({ key: `${name}_${unitIdx}_plate`,    label: `Номер для ${name}-${n}`,     deviceName: name, photoType: "plate",    unitIdx, required: false });
+    slots.push({ key: `${name}_${unitIdx}_odometer`, label: `Пробег ${name}-${n}`, deviceName: name, photoType: "odometer", unitIdx, required: false });
+    slots.push({ key: `${name}_${unitIdx}_plate`,    label: `Номер ${name}-${n}`,  deviceName: name, photoType: "plate",    unitIdx, required: false });
   };
 
   for (const opt of opts) {
@@ -186,6 +186,38 @@ async function safeSend(chatId, text, extra = {}) {
   return sendMessage(chatId, text, extra).catch((e) =>
     console.warn(`safeSend to ${chatId} failed: ${e?.message || e}`)
   );
+}
+
+// Пересылает любое сообщение (текст, фото, видео, файл, голос, контакт, геолокация, стикер, видеозаметка)
+async function forwardChatMessage(message, toChatId, fromLabel) {
+  const cap = (extra) => extra ? `${fromLabel}:\n${extra}` : fromLabel;
+  if (message.text) {
+    await safeSend(toChatId, `${fromLabel}:\n${message.text}`);
+  } else if (message.photo?.length) {
+    const fid = message.photo[message.photo.length - 1].file_id;
+    await tg("sendPhoto", { chat_id: toChatId, photo: fid, caption: cap(message.caption) }).catch(() => {});
+  } else if (message.document) {
+    await tg("sendDocument", { chat_id: toChatId, document: message.document.file_id, caption: cap(message.caption) }).catch(() => {});
+  } else if (message.video) {
+    await tg("sendVideo", { chat_id: toChatId, video: message.video.file_id, caption: cap(message.caption) }).catch(() => {});
+  } else if (message.voice) {
+    await tg("sendVoice", { chat_id: toChatId, voice: message.voice.file_id, caption: cap(message.caption) }).catch(() => {});
+  } else if (message.audio) {
+    await tg("sendAudio", { chat_id: toChatId, audio: message.audio.file_id, caption: cap(message.caption) }).catch(() => {});
+  } else if (message.video_note) {
+    await safeSend(toChatId, fromLabel);
+    await tg("sendVideoNote", { chat_id: toChatId, video_note: message.video_note.file_id }).catch(() => {});
+  } else if (message.sticker) {
+    await safeSend(toChatId, `${fromLabel}: [стикер]`);
+    await tg("sendSticker", { chat_id: toChatId, sticker: message.sticker.file_id }).catch(() => {});
+  } else if (message.contact) {
+    const c = message.contact;
+    await safeSend(toChatId, `${fromLabel}: 📱 Контакт`);
+    await tg("sendContact", { chat_id: toChatId, phone_number: c.phone_number, first_name: c.first_name || "", last_name: c.last_name || "" }).catch(() => {});
+  } else if (message.location) {
+    await safeSend(toChatId, `${fromLabel}: 📍 Геолокация`);
+    await tg("sendLocation", { chat_id: toChatId, latitude: message.location.latitude, longitude: message.location.longitude }).catch(() => {});
+  }
 }
 
 async function sendDocument(chatId, filePath, caption) {
@@ -719,14 +751,13 @@ async function onMessage(message) {
     const masterTgId = st.data.masterTgId;
     const master = MASTERS.find((m) => String(m.tgId) === String(masterTgId));
     const masterName = master ? master.name : "мастер";
-    if (text) {
-      await sendMessage(masterTgId, `💬 Сообщение от админа:\n${text}`);
-      // супер-админу дублируем чат администратора с мастером (чтобы он всё видел)
+    const hasContent = text || message.photo || message.document || message.video ||
+      message.voice || message.audio || message.video_note || message.sticker ||
+      message.contact || message.location;
+    if (hasContent) {
+      await forwardChatMessage(message, masterTgId, "💬 Сообщение от админа");
       if (String(chatId) === String(ADMIN_CHAT_ID)) {
-        await sendMessage(
-          SUPER_ADMIN_ID,
-          `📡 Чат админа с мастером ${masterName}:\n${text}`
-        );
+        await forwardChatMessage(message, SUPER_ADMIN_ID, `📡 Чат админа с мастером ${masterName}`);
       }
       await sendMessage(chatId, `✅ Отправлено ${masterName}.`, { reply_markup: adminMenuReplyKeyboard() });
     }
@@ -737,18 +768,13 @@ async function onMessage(message) {
   if (st.step === "MASTER_CHAT_WITH_ADMIN") {
     const master = MASTERS.find((m) => String(m.tgId) === String(chatId));
     const masterName = master ? master.name : "Мастер";
-    if (text) {
-      // основное общение мастера идёт с обычным админом
-      await sendMessage(
-        ADMIN_CHAT_ID,
-        `💬 Сообщение от мастера ${masterName}:\n${text}`
-      );
-      // супер-админ видит копию диалога, но без ID
+    const hasContent = text || message.photo || message.document || message.video ||
+      message.voice || message.audio || message.video_note || message.sticker ||
+      message.contact || message.location;
+    if (hasContent) {
+      await forwardChatMessage(message, ADMIN_CHAT_ID, `💬 Мастер ${masterName}`);
       if (String(SUPER_ADMIN_ID) !== String(ADMIN_CHAT_ID)) {
-        await sendMessage(
-          SUPER_ADMIN_ID,
-          `📡 Копия сообщения мастера ${masterName} администратору:\n${text}`
-        );
+        await forwardChatMessage(message, SUPER_ADMIN_ID, `📡 Мастер ${masterName} → админу`);
       }
       await sendMessage(chatId, "✅ Отправлено админу.", { reply_markup: masterMenuReplyKeyboard() });
     }
@@ -1871,6 +1897,11 @@ async function onCallback(cb) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
+    // Защита от повторной отправки (если уже отправлено через текстовый ввод)
+    if (order.status === "SENT_TO_MASTER") {
+      await editMessage(chatId, messageId, "✅ Заявка уже отправлена мастеру.");
+      return;
+    }
     if (!order.adminComment) order.adminComment = "";
     order.status = "SENT_TO_MASTER";
     clearState(chatId);
@@ -2409,6 +2440,17 @@ function formatAdminConfirm(order) {
   const optLine = order.type === "INSTALL" ? `📦 Устройства: ${optionsLabel(order)}` : "";
   const addrLine = order.logistics === "VISIT" ? `📍 Адрес: ${order.address || "-"}` : "";
 
+  let totalsLine = "";
+  if (order.type === "INSTALL") {
+    const deviceSlots = getPhotoSlots(order).filter(s => s.photoType === "device");
+    if (deviceSlots.length) {
+      const byDev = {};
+      for (const s of deviceSlots) byDev[s.deviceName] = (byDev[s.deviceName] || 0) + 1;
+      const summary = Object.entries(byDev).map(([n, c]) => `${n}×${c}`).join(", ");
+      totalsLine = `📊 Итого устройств: ${summary} (${deviceSlots.length} шт.)`;
+    }
+  }
+
   return (
     `✅ Заявка #${order.id} отправлена мастеру.\n` +
     `📞 Телефон: ${order.phone}\n` +
@@ -2418,6 +2460,7 @@ function formatAdminConfirm(order) {
     `🚗/🏢: ${logisticsLabel(order)}\n` +
     (addrLine ? `${addrLine}\n` : "") +
     (optLine ? `${optLine}\n` : "") +
+    (totalsLine ? `${totalsLine}\n` : "") +
     `💬 Комментарий: ${order.adminComment || "-"}`
   );
 }
