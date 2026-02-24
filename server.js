@@ -275,7 +275,10 @@ function reportCalendarKeyboard(mode, yyyymm) {
 function masterOrderKeyboard(orderId) {
   return {
     inline_keyboard: [
-      [{ text: "✅ Беру заявку", callback_data: `MASTER_ACCEPT:${orderId}` }],
+      [
+        { text: "✅ Беру сегодня", callback_data: `MASTER_ACCEPT:${orderId}:TODAY` },
+        { text: "✅ Беру завтра", callback_data: `MASTER_ACCEPT:${orderId}:TOMORROW` },
+      ],
       [{ text: "❌ Не могу", callback_data: `MASTER_DECLINE:${orderId}` }],
     ],
   };
@@ -571,7 +574,7 @@ async function onMessage(message) {
       if (String(chatId) === String(ADMIN_CHAT_ID)) {
         await sendMessage(
           SUPER_ADMIN_ID,
-          `📡 Чат админа с мастером ${masterName} (ID мастера: ${masterTgId}):\n${text}`
+          `📡 Чат админа с мастером ${masterName}:\n${text}`
         );
       }
       await sendMessage(chatId, `✅ Отправлено ${masterName}.`, { reply_markup: adminMenuReplyKeyboard() });
@@ -1738,13 +1741,16 @@ function buildExcelReport(from, to, opts = {}) {
   const rows = [
     [
       "№",
+      "Дата начала",
       "Время начала",
+      "Дата завершения",
       "Время завершения",
       "Тип",
       "Вид монтажа",
       "Город",
       "Мастер",
       "Логистика",
+      "План работ (дата)",
       "Адрес выезда",
       "Телефон",
       "Комментарий",
@@ -1752,25 +1758,21 @@ function buildExcelReport(from, to, opts = {}) {
     ],
   ];
 
-  function datetimeInTz(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    return `${formatDateInTz(d)} ${formatTimeInTz(d)}`;
-  }
-
   items.forEach((o, i) => {
     const dStart = o.createdAt ? new Date(o.createdAt) : null;
     const dEnd = o.completedAt ? new Date(o.completedAt) : null;
     rows.push([
       i + 1,
-      dStart ? datetimeInTz(o.createdAt) : "",
-      dEnd ? datetimeInTz(o.completedAt) : "",
+      dStart ? formatDateInTz(dStart) : "",
+      dStart ? formatTimeInTz(dStart) : "",
+      dEnd ? formatDateInTz(dEnd) : "",
+      dEnd ? formatTimeInTz(dEnd) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
       o.type === "INSTALL" ? (o.option || "—") : "—",
       o.city || "—",
       o.masterName || "—",
       o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
+      o.acceptPlannedDayAt ? formatDateInTz(new Date(o.acceptPlannedDayAt)) : "",
       o.address || "—",
       o.phone || "—",
       (o.adminComment || "").replace(/\n/g, " "),
@@ -1834,39 +1836,38 @@ function buildExcelReportPending(opts = {}) {
   const rows = [
     [
       "№",
+      "Дата начала",
       "Время начала",
+      "Дата завершения",
       "Время завершения",
       "Тип",
       "Вид монтажа",
       "Город",
       "Мастер",
       "Логистика",
-      "Адрес",
+      "План работ (дата)",
+      "Адрес выезда",
       "Телефон",
       "Комментарий",
       "Статус",
     ],
   ];
 
-  function datetimeInTz(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    return `${formatDateInTz(d)} ${formatTimeInTz(d)}`;
-  }
-
   items.forEach((o, i) => {
     const dStart = o.createdAt ? new Date(o.createdAt) : null;
     const dEnd = o.completedAt ? new Date(o.completedAt) : null;
     rows.push([
       i + 1,
-      dStart ? datetimeInTz(o.createdAt) : "",
-      dEnd ? datetimeInTz(o.completedAt) : "",
+      dStart ? formatDateInTz(dStart) : "",
+      dStart ? formatTimeInTz(dStart) : "",
+      dEnd ? formatDateInTz(dEnd) : "",
+      dEnd ? formatTimeInTz(dEnd) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
       o.type === "INSTALL" ? (o.option || "—") : "—",
       o.city || "—",
       o.masterName || "—",
       o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
+      o.acceptPlannedDayAt ? formatDateInTz(new Date(o.acceptPlannedDayAt)) : "",
       o.address || "—",
       o.phone || "—",
       (o.adminComment || "").replace(/\n/g, " "),
