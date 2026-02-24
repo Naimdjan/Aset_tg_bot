@@ -974,6 +974,7 @@ async function onMessage(message) {
     const orderId   = st.data.orderId;
     const photoType = st.data.photoType;
     const origMsgId = st.data.messageId; // сообщение с клавиатурой заявки
+    const frMsgId   = st.data.frMsgId;   // force_reply сообщение
     const order = orders.get(orderId);
     if (!order || order.masterTgId !== chatId) {
       clearState(chatId);
@@ -988,6 +989,12 @@ async function onMessage(message) {
       await sendMessage(chatId, "⚠️ Пожалуйста, отправьте именно фото.");
       return;
     }
+
+    // Удаляем force_reply сообщение и само фото мастера из чата
+    if (frMsgId) {
+      await tg("deleteMessage", { chat_id: chatId, message_id: frMsgId }).catch(() => {});
+    }
+    await tg("deleteMessage", { chat_id: chatId, message_id: message.message_id }).catch(() => {});
 
     const fileId = photos[photos.length - 1].file_id;
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
@@ -1721,14 +1728,23 @@ async function onCallback(cb) {
     const slot = getPhotoSlots(order).find(s => s.key === photoType);
     const label = slot ? slot.label : photoType;
 
-    // Сохраняем messageId чтобы редактировать именно это сообщение при получении фото
-    setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType, messageId });
     // Обновляем текст сообщения — показываем какой слот ожидается
     await editMessage(
       chatId, messageId,
-      `📷 Заявка #${order.id} — ожидается фото: ${label}\n\nОтправьте фото в чат:`,
+      `📷 Заявка #${order.id} — ожидается фото: ${label}`,
       { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
     ).catch(() => {});
+
+    // force_reply открывает поле ответа (скрепка → Фото)
+    const frResult = await tg("sendMessage", {
+      chat_id: chatId,
+      text: `📎 ${label} — прикрепите фото:`,
+      reply_markup: { force_reply: true, selective: true, input_field_placeholder: "Отправьте фото…" },
+    }).catch(() => null);
+    const frMsgId = frResult?.result?.message_id ?? null;
+
+    // Сохраняем messageId клавиатуры и force_reply чтобы удалить после получения фото
+    setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType, messageId, frMsgId });
     return;
   }
 
@@ -1903,6 +1919,7 @@ async function onCallback(cb) {
       lastReminderAt: null,          // когда последний раз отправлено напоминание
       reminderCount: 0,              // сколько напоминаний отправлено
       estimatedInstallHours: null,   // оценка мастера: сколько часов займёт установка
+      masterPhotoMsgIds: [],         // message_id фото мастера — удаляем после передачи
 
       devicePhotos: {},   // { slotKey: fileId|"SKIPPED" }
 
