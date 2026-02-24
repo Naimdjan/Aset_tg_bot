@@ -17,7 +17,7 @@ if (!BOT_TOKEN) console.error("❌ BOT_TOKEN not found in environment variables"
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // Пароль для доступа к боту (если задан — после /start нужно ввести пароль)
-const BOT_PASSWORD = (process.env.BOT_PASSWORD || "").trim();
+const BOT_PASSWORD = (process.env.BOT_PASSWORD || "").trim().replace(/\r$/, "");
 const authorizedChatIds = new Set(); // chatId строкой
 
 function isAuthorized(chatId) {
@@ -385,13 +385,14 @@ async function onMessage(message) {
   if (BOT_PASSWORD) {
     const st = getState(chatId);
     if (!isAuthorized(chatId)) {
-      if (text === "/start") {
+      if (text.startsWith("/start")) {
         setState(chatId, "WAIT_PASSWORD", {});
         await sendMessage(chatId, "🔐 Введите пароль для доступа к боту:");
         return;
       }
       if (st && st.step === "WAIT_PASSWORD") {
-        if (text === BOT_PASSWORD) {
+        const enteredPassword = text.replace(/\r$/, "").trim();
+        if (enteredPassword === BOT_PASSWORD) {
           setAuthorized(chatId);
           clearState(chatId);
           await sendMessage(chatId, "✅ Доступ разрешён. Меню активировано.", {
@@ -568,33 +569,21 @@ async function onMessage(message) {
       return;
     }
 
-    order.status = "DONE";
-    clearState(chatId);
+    // Все фото/пропуски собраны — показываем кнопку «Выполнено»
+    setState(chatId, "MASTER_WAIT_DONE", { orderId });
+    await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены. Нажмите «✅ Выполнено» для завершения.`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
+      },
+    });
+    return;
+  }
 
-    await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены.`, {
+
+  if (st.step === "MASTER_WAIT_DONE") {
+    await sendMessage(chatId, "Нажмите кнопку «✅ Выполнено» в сообщении выше.", {
       reply_markup: masterMenuReplyKeyboard(),
     });
-
-    const adminChatId = order.adminChatId || MAIN_ADMIN_ID;
-    await sendMessage(
-      adminChatId,
-      `✅ Клиент по заявке #${order.id} обслужен.\n` +
-        `👷 Мастер: ${order.masterName}\n` +
-        `🚗/🏢: ${logisticsLabel(order)}`
-    );
-    if (order.carNumberPhotoId) {
-      await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
-    } else if (order.carNumberSkipped) {
-      await sendMessage(adminChatId, "🚗 Номер автомобиля: не приложен (мастер выбрал «Без номера»)");
-    }
-    if (order.odometerPhotoId) {
-      await sendPhoto(adminChatId, order.odometerPhotoId, "📷 Пробег спидометра");
-    } else if (order.odometerSkipped) {
-      await sendMessage(adminChatId, "📏 Пробег: не приложен (мастер выбрал «Без пробега»)");
-    }
-    if (order.devicePhotoId) {
-      await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
-    }
     return;
   }
 
@@ -637,7 +626,7 @@ async function onCallback(cb) {
     return;
   }
 
-  // Cancel — на шаге комментария не сбрасываем заявку: пользователь может ещё ввести текст
+  // Cancel — сброс текущего шага без пароля
   if (data === "CANCEL") {
     const st = getState(chatId);
     if (st && st.step === "ADMIN_WAIT_COMMENT") {
@@ -988,15 +977,30 @@ async function onCallback(cb) {
       return;
     }
 
+    setState(chatId, "MASTER_WAIT_DONE", { orderId });
+    await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены. Нажмите «✅ Выполнено» для завершения.`);
+    await sendMessage(chatId, "Нажмите кнопку ниже:", {
+      reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] },
+    });
+    return;
+  }
+
+  // MASTER: нажал «Выполнено» — завершение заявки и уведомление админу
+  if (data.startsWith("MASTER_DONE:")) {
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+
     order.status = "DONE";
+    order.completedAt = new Date().toISOString();
     clearState(chatId);
-    await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены.`);
-    await sendMessage(chatId, "Готово.", { reply_markup: masterMenuReplyKeyboard() });
+    await editMessage(chatId, messageId, "✅ Выполнено.", { reply_markup: { inline_keyboard: [] } });
+    await sendMessage(chatId, "✅ Готово.", { reply_markup: masterMenuReplyKeyboard() });
 
     const adminChatId = order.adminChatId || MAIN_ADMIN_ID;
     await sendMessage(
       adminChatId,
-      `✅ Клиент по заявке #${order.id} обслужен.\n` +
+      `✅ Заявка #${order.id} выполнена.\n` +
         `👷 Мастер: ${order.masterName}\n` +
         `🚗/🏢: ${logisticsLabel(order)}`
     );
@@ -1404,8 +1408,8 @@ function buildExcelReport(from, to, opts = {}) {
   const rows = [
     [
       "№",
-      "Дата",
-      "Время",
+      "Время начала",
+      "Время завершения",
       "Тип",
       "Вид монтажа",
       "Город",
@@ -1418,12 +1422,20 @@ function buildExcelReport(from, to, opts = {}) {
     ],
   ];
 
+  function datetimeInTz(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return `${formatDateInTz(d)} ${formatTimeInTz(d)}`;
+  }
+
   items.forEach((o, i) => {
-    const d = o.createdAt ? new Date(o.createdAt) : null;
+    const dStart = o.createdAt ? new Date(o.createdAt) : null;
+    const dEnd = o.completedAt ? new Date(o.completedAt) : null;
     rows.push([
       i + 1,
-      d ? formatDateInTz(d) : "",
-      d ? formatTimeInTz(d) : "",
+      dStart ? datetimeInTz(o.createdAt) : "",
+      dEnd ? datetimeInTz(o.completedAt) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
       o.type === "INSTALL" ? (o.option || "—") : "—",
       o.city || "—",
@@ -1440,8 +1452,46 @@ function buildExcelReport(from, to, opts = {}) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Заявки");
 
+  // Сводка по видам монтажа (только заявки INSTALL)
+  const installs = items.filter((o) => o.type === "INSTALL");
+  const byOption = {};
+  for (const o of installs) {
+    const opt = o.option || "—";
+    byOption[opt] = (byOption[opt] || 0) + 1;
+  }
+  const optionRows = [["Вид монтажа", "Количество"]];
+  Object.entries(byOption).forEach(([opt, cnt]) => {
+    optionRows.push([opt, cnt]);
+  });
+  const wsOptions = XLSX.utils.aoa_to_sheet(optionRows);
+  XLSX.utils.book_append_sheet(wb, wsOptions, "Сводка по видам");
+
+  // Сводка по монтажникам (мастерам)
+  const byMaster = {};
+  for (const o of items) {
+    const name = o.masterName || "—";
+    if (!byMaster[name]) {
+      byMaster[name] = { total: 0, installs: 0, repairs: 0 };
+    }
+    byMaster[name].total += 1;
+    if (o.type === "INSTALL") byMaster[name].installs += 1;
+    else if (o.type === "REPAIR") byMaster[name].repairs += 1;
+  }
+  const masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое"]];
+  Object.entries(byMaster).forEach(([name, stats]) => {
+    masterRows.push([name, stats.total, stats.installs, stats.repairs]);
+  });
+  const wsMasters = XLSX.utils.aoa_to_sheet(masterRows);
+  XLSX.utils.book_append_sheet(wb, wsMasters, "Сводка по мастерам");
+
   const tmpDir = os.tmpdir();
-  const filename = `report_${from.getTime()}_${to.getTime()}.xlsx`;
+  // Имя файла вида: Установки_01.03.2026-31.03.2026.xlsx
+  const fromStr = formatDate(from);
+  const toStr = formatDate(to);
+  const filename =
+    fromStr === toStr
+      ? `Установки_${fromStr}.xlsx`
+      : `Установки_${fromStr}-${toStr}.xlsx`;
   const filePath = path.join(tmpDir, filename);
   XLSX.writeFile(wb, filePath);
   return filePath;
