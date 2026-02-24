@@ -1233,6 +1233,7 @@ async function onCallback(cb) {
     const dayChoice = data.split(":")[2]; // TODAY | TOMORROW
 
     order.status = "ACCEPTED_BY_MASTER";
+    if (!order.acceptedAt) order.acceptedAt = new Date().toISOString();
     await editMessage(
       chatId,
       messageId,
@@ -1816,12 +1817,15 @@ async function onCallback(cb) {
       adminSuggestedTimeText: "",
       confirmedTimeText: "",
       actualArrivalAt: null,
+      acceptedAt: null,          // когда мастер принял заявку (ACCEPTED_BY_MASTER)
+      lastReminderAt: null,      // когда последний раз отправлено напоминание
+      reminderCount: 0,          // сколько напоминаний уже отправлено
 
       devicePhotos: {},   // { slotKey: fileId|"SKIPPED" }
 
       options: [],
       deviceQuantities: {},  // { "FMB920": 2, "FMB125+DUT": 1 }
-      totalDevices: 0,       // сумма всех количеств
+      totalDevices: 0,
       acceptPlannedDayAt: null,
 
       status: "NEW",
@@ -2680,6 +2684,81 @@ async function sendOrderToMaster(order) {
     reply_markup: masterOrderKeyboard(order.id),
   });
 }
+
+// =============================
+// Order reminders
+// =============================
+
+const REMINDER_ACTIVE_STATUSES = new Set([
+  "ACCEPTED_BY_MASTER",
+  "WAIT_ADMIN_CONFIRM_TIME",
+  "WAIT_MASTER_CONFIRM_TIME",
+  "TIME_CONFIRMED",
+  "CLIENT_ARRIVED",
+]);
+
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+const THIRTY_MIN_MS  = 30 * 60 * 1000;
+
+async function checkOrderReminders() {
+  const now = Date.now();
+  for (const [, order] of orders) {
+    if (!REMINDER_ACTIVE_STATUSES.has(order.status)) continue;
+    if (!order.acceptedAt) continue;
+
+    const acceptedTs = new Date(order.acceptedAt).getTime();
+    const elapsed = now - acceptedTs;
+    if (elapsed < THREE_HOURS_MS) continue; // ещё не прошло 3 часа
+
+    const lastRemTs = order.lastReminderAt ? new Date(order.lastReminderAt).getTime() : 0;
+    const sinceLastRem = now - lastRemTs;
+
+    // Первое напоминание — после 3 ч; следующие — каждые 30 мин
+    if (lastRemTs !== 0 && sinceLastRem < THIRTY_MIN_MS) continue;
+
+    order.lastReminderAt = new Date().toISOString();
+    order.reminderCount = (order.reminderCount || 0) + 1;
+
+    const hoursElapsed = Math.floor(elapsed / (60 * 60 * 1000));
+    const minElapsed   = Math.floor((elapsed % (60 * 60 * 1000)) / 60000);
+    const timeStr      = hoursElapsed > 0 ? `${hoursElapsed}ч ${minElapsed}мин` : `${minElapsed}мин`;
+    const reminder     = order.reminderCount;
+
+    // Уведомление мастеру
+    safeSend(
+      order.masterTgId,
+      `⏰ Напоминание #${reminder}: заявка #${order.id} ещё активна!\n` +
+      `📊 Статус: ${statusLabel(order.status)}\n` +
+      `📞 Клиент: ${order.phone}\n` +
+      `⏱ Прошло: ${timeStr} с момента принятия\n\n` +
+      `Завершите работы или свяжитесь с администратором.`
+    );
+
+    // Уведомление администратору
+    const adminId = order.adminChatId || SUPER_ADMIN_ID;
+    safeSend(
+      adminId,
+      `⏰ Напоминание #${reminder}: заявка #${order.id} не закрыта!\n` +
+      `👷 Мастер: ${order.masterName}\n` +
+      `📊 Статус: ${statusLabel(order.status)}\n` +
+      `📞 Клиент: ${order.phone}\n` +
+      `⏱ Прошло: ${timeStr} с момента принятия`
+    );
+    if (String(adminId) !== String(SUPER_ADMIN_ID)) {
+      safeSend(
+        SUPER_ADMIN_ID,
+        `⏰ Напоминание #${reminder}: заявка #${order.id} не закрыта!\n` +
+        `👷 Мастер: ${order.masterName}\n` +
+        `📊 Статус: ${statusLabel(order.status)}\n` +
+        `📞 Клиент: ${order.phone}\n` +
+        `⏱ Прошло: ${timeStr} с момента принятия`
+      );
+    }
+  }
+}
+
+// Проверяем раз в 5 минут
+setInterval(checkOrderReminders, 5 * 60 * 1000);
 
 // =============================
 // Start server
