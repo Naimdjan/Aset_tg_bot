@@ -53,8 +53,56 @@ const OPTIONS = [
   "FMB125+DUT",
   "FMB125+Temp.",
   "Video",
+  "Реле",
   "Другое",
 ];
+
+// Разбивка комбо-устройств на компоненты для фото
+const DEVICE_EXPANSION = {
+  "FMB125+DUT":   [{ name: "FMB125", required: true  }, { name: "DUT",   required: true  }],
+  "FMB125+Temp.": [{ name: "FMB125", required: true  }, { name: "Temp.", required: false }],
+  "FMB140+Temp.": [{ name: "FMB140", required: true  }, { name: "Temp.", required: false }],
+};
+// Устройства с обязательным фото
+const PHOTO_REQUIRED = new Set(["FMB920", "FMB125", "FMB140", "DUT"]);
+
+// Возвращает список фото-слотов для заявки
+// Каждый слот: { key, label, deviceName, required }
+// key используется как ключ в order.devicePhotos
+function getPhotoSlots(order) {
+  const opts = order.options?.length ? order.options : (order.option ? [order.option] : []);
+  if (!opts.length) return [];
+
+  // Считаем суммарное количество каждого компонента
+  const totals = {};
+  for (const opt of opts) {
+    const qty = order.deviceQuantities?.[opt] || 1;
+    const comps = DEVICE_EXPANSION[opt] || [{ name: opt, required: PHOTO_REQUIRED.has(opt) }];
+    for (const c of comps) totals[c.name] = (totals[c.name] || 0) + qty;
+  }
+
+  // Генерируем слоты в порядке: для каждого opt, для каждой единицы qty, для каждого компонента
+  const current = {};
+  const slots = [];
+  for (const opt of opts) {
+    const qty = order.deviceQuantities?.[opt] || 1;
+    const comps = DEVICE_EXPANSION[opt] || [{ name: opt, required: PHOTO_REQUIRED.has(opt) }];
+    for (let i = 0; i < qty; i++) {
+      for (const c of comps) {
+        const idx = current[c.name] || 0;
+        const total = totals[c.name];
+        current[c.name] = idx + 1;
+        const key = `${c.name}_${idx}`;
+        const label = total > 1 ? `${c.name} ${idx + 1}/${total}` : c.name;
+        slots.push({ key, label, deviceName: c.name, required: c.required });
+      }
+    }
+  }
+  // #region agent log
+  fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e7f15'},body:JSON.stringify({sessionId:'0e7f15',location:'server.js:getPhotoSlots',message:'slots generated',data:{opts,slots:slots.map(s=>s.key+':'+s.label)},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  return slots;
+}
 
 // =============================
 // In-memory storage (для теста)
@@ -323,29 +371,27 @@ function masterArrivalPhotoKeyboard(orderId, order) {
     ]);
   }
 
-  // Фото для каждого устройства по отдельности
-  const totalDevs = order.totalDevices || 1;
+  // Фото устройств: одна кнопка на тип с числом оставшихся (FMB920/4 → FMB920/3 → ...)
   const devPhotos = order.devicePhotos || {};
-  for (let i = 0; i < totalDevs; i++) {
-    const done = devPhotos[String(i)] !== undefined ||
-      (i === 0 && (order.devicePhotoId || order.deviceSkipped));
-    if (!done) {
-      const label = totalDevs > 1 ? `устройства ${i + 1}/${totalDevs}` : "устройства";
-      rows.push([
-        { text: `📷 Фото ${label}`, callback_data: `MASTER_PHOTO:${orderId}:DEVICE_${i}` },
-        { text: "⏭ Без фото", callback_data: `MASTER_SKIP:${orderId}:DEVICE_${i}` },
-      ]);
+  const slots = getPhotoSlots(order);
+  // Группируем незаполненные слоты по имени устройства
+  const deviceGroups = {};
+  for (const slot of slots) {
+    if (devPhotos[slot.key] !== undefined) continue; // уже заполнен
+    if (!deviceGroups[slot.deviceName]) {
+      deviceGroups[slot.deviceName] = { remaining: 0, firstSlot: slot, required: slot.required };
     }
+    deviceGroups[slot.deviceName].remaining++;
   }
-
-  // DUT — нужно фото если в устройствах есть DUT
-  const allOptions = order.options?.length ? order.options : (order.option ? [order.option] : []);
-  const needDut = allOptions.some(o => o.includes("DUT"));
-  if (needDut && !order.dutPhotoId && !order.dutSkipped) {
-    rows.push([
-      { text: "📷 Фото DUT", callback_data: `MASTER_PHOTO:${orderId}:DUT` },
-      { text: "⏭ Без фото DUT", callback_data: `MASTER_SKIP:${orderId}:DUT` },
-    ]);
+  for (const group of Object.values(deviceGroups)) {
+    const btnText = group.remaining > 1
+      ? `📷 ${group.firstSlot.deviceName}/${group.remaining}`
+      : `📷 ${group.firstSlot.deviceName}`;
+    const row = [{ text: btnText, callback_data: `MASTER_PHOTO:${orderId}:${group.firstSlot.key}` }];
+    if (!group.required) {
+      row.push({ text: "⏭ Пропустить", callback_data: `MASTER_SKIP:${orderId}:${group.firstSlot.key}` });
+    }
+    rows.push(row);
   }
 
   if (rows.length === 0) return null;
@@ -435,7 +481,7 @@ function masterCalendarKeyboard(orderId, yyyymm) {
 
 function masterHourKeyboard(orderId, yyyymmdd) {
   const hours = [];
-  for (let h = 8; h <= 20; h++) hours.push(h);
+  for (let h = 5; h <= 21; h++) hours.push(h);
   const rows = [];
   for (let i = 0; i < hours.length; i += 4) {
     rows.push(
@@ -757,21 +803,38 @@ async function onMessage(message) {
     }
 
     const fileId = photos[photos.length - 1].file_id;
-    if (photoType === "PLATE") order.carNumberPhotoId = fileId;
-    else if (photoType === "ODOMETER") order.odometerPhotoId = fileId;
-    else if (photoType === "DEVICE") order.devicePhotoId = fileId;
-    else if (photoType.startsWith("DEVICE_")) {
-      const idx = photoType.split("_")[1];
+    const adminChatIdImm = order.adminChatId || MAIN_ADMIN_ID;
+    let photoLabel = photoType;
+    // #region agent log
+    fetch('http://127.0.0.1:7890/ingest/1ec67a1d-2ee6-4bbb-a0b5-ba4bc0a688d0',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0e7f15'},body:JSON.stringify({sessionId:'0e7f15',location:'server.js:MASTER_WAIT_PHOTO',message:'photo received',data:{photoType,orderId,devPhotos:order.devicePhotos},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+
+    if (photoType === "PLATE") {
+      order.carNumberPhotoId = fileId;
+      photoLabel = "Номер автомобиля";
+    } else if (photoType === "ODOMETER") {
+      order.odometerPhotoId = fileId;
+      photoLabel = "Пробег спидометра";
+    } else {
+      // Слот устройства (новый формат: "FMB920_0", "DUT_1" и т.д.)
       if (!order.devicePhotos) order.devicePhotos = {};
-      order.devicePhotos[idx] = fileId;
-      if (idx === "0") order.devicePhotoId = fileId; // backward compat
+      order.devicePhotos[photoType] = fileId;
+      const slot = getPhotoSlots(order).find(s => s.key === photoType);
+      photoLabel = slot ? slot.label : photoType;
     }
-    else if (photoType === "DUT") order.dutPhotoId = fileId;
+
+    // Немедленно пересылаем фото администратору
+    safeSend(adminChatIdImm, `📷 Мастер ${order.masterName || ""}: фото "${photoLabel}" (#${order.id})`);
+    await sendPhoto(adminChatIdImm, fileId, `📷 ${photoLabel} — заявка #${order.id}`).catch(() => {});
+    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) {
+      safeSend(SUPER_ADMIN_ID, `📷 Мастер ${order.masterName || ""}: фото "${photoLabel}" (#${order.id})`);
+      sendPhoto(SUPER_ADMIN_ID, fileId, `📷 ${photoLabel} — заявка #${order.id}`).catch(() => {});
+    }
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     if (kb) {
       clearState(chatId);
-      await sendMessage(chatId, "✅ Фото сохранено. Выберите следующее или отправьте оставшиеся:", {
+      await sendMessage(chatId, "✅ Фото отправлено. Выберите следующее или отправьте оставшиеся:", {
         reply_markup: kb,
       });
       return;
@@ -1228,14 +1291,18 @@ async function onCallback(cb) {
     );
 
     // Уведомление мастеру
+    const isVisit = order.logistics === "VISIT";
+    const arrivalBtnText = isVisit ? "🚗 Я у клиента" : "🚗 Клиент приехал";
+    const arrivalPrompt = isVisit
+      ? "Когда прибудете к клиенту, нажмите кнопку ниже:"
+      : "Когда клиент приедет, нажмите кнопку ниже:";
     await sendMessage(
       order.masterTgId,
-      `✅ Администратор подтвердил время для заявки #${order.id}:\n⏰ ${order.confirmedTimeText}\n\n` +
-        "Когда клиент приедет, нажмите кнопку ниже:",
+      `✅ Администратор подтвердил время для заявки #${order.id}:\n⏰ ${order.confirmedTimeText}\n\n${arrivalPrompt}`,
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🚗 Клиент приехал", callback_data: `MASTER_CLIENT_ARRIVED:${order.id}` }],
+            [{ text: arrivalBtnText, callback_data: `MASTER_CLIENT_ARRIVED:${order.id}` }],
           ],
         },
       }
@@ -1287,21 +1354,28 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
-    const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства", DUT: "датчика DUT" };
     let label;
-    if (photoType.startsWith("DEVICE_")) {
-      const idx = parseInt(photoType.split("_")[1]);
-      const totalDevs = order.totalDevices || 1;
-      label = totalDevs > 1 ? `устройства ${idx + 1}/${totalDevs}` : "устройства";
-    } else {
-      label = labels[photoType] || "фото";
+    if (photoType === "PLATE") label = "номера автомобиля";
+    else if (photoType === "ODOMETER") label = "пробега спидометра";
+    else {
+      // Слот устройства: ключ вида "FMB920_0", "DUT_1" и т.д.
+      const slots = getPhotoSlots(order);
+      const slot = slots.find(s => s.key === photoType);
+      if (slot) {
+        // Считаем сколько ещё осталось для данного типа
+        const devPhotos = order.devicePhotos || {};
+        const remaining = slots.filter(s => s.deviceName === slot.deviceName && devPhotos[s.key] === undefined).length;
+        label = remaining > 1 ? `${slot.deviceName} (осталось ${remaining})` : slot.deviceName;
+      } else {
+        label = photoType;
+      }
     }
 
     setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
     await editMessage(
       chatId,
       messageId,
-      `📸 Фото ${label}\n\nНажмите 📎 (скрепка) рядом с полем ввода → выберите «Фото» или «Камера» и отправьте снимок.`,
+      `📸 Фото: ${label}\n\nНажмите 📎 рядом с полем ввода → выберите «Фото» или «Камера» и отправьте снимок.`,
       { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
     );
     return;
@@ -1320,19 +1394,12 @@ async function onCallback(cb) {
     } else if (skipType === "ODOMETER") {
       order.odometerSkipped = true;
       skipLabel = "пробега";
-    } else if (skipType === "DEVICE") {
-      order.deviceSkipped = true;
-      skipLabel = "устройства";
-    } else if (skipType.startsWith("DEVICE_")) {
-      const idx = skipType.split("_")[1];
+    } else {
+      // Слот устройства (новый формат: "FMB920_0", "DUT_1" и т.д.)
       if (!order.devicePhotos) order.devicePhotos = {};
-      order.devicePhotos[idx] = "SKIPPED";
-      if (idx === "0") order.deviceSkipped = true;
-      const totalDevs = order.totalDevices || 1;
-      skipLabel = totalDevs > 1 ? `устройства ${parseInt(idx) + 1}/${totalDevs}` : "устройства";
-    } else if (skipType === "DUT") {
-      order.dutSkipped = true;
-      skipLabel = "фото DUT";
+      order.devicePhotos[skipType] = "SKIPPED";
+      const slot = getPhotoSlots(order).find(s => s.key === skipType);
+      skipLabel = slot ? slot.label : skipType;
     }
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
@@ -1379,38 +1446,25 @@ async function onCallback(cb) {
       `🚗/🏢: ${logisticsLabel(order)}\n\n` +
       `Нажмите кнопку ниже, чтобы официально закрыть заявку.`;
     await sendMessage(adminChatId, doneMsg, { reply_markup: doneCloseKb });
+    // Фото были переданы в реальном времени; при завершении отправляем краткую сводку
     if (order.carNumberPhotoId) {
-      await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
+      // фото уже было отправлено сразу — пропускаем повтор
     } else if (order.carNumberSkipped) {
-      await sendMessage(adminChatId, "🚗 Номер автомобиля: не приложен (мастер выбрал «Без номера»)");
+      await sendMessage(adminChatId, "🚗 Номер авто: без фото");
     }
-    if (order.odometerPhotoId) {
-      await sendPhoto(adminChatId, order.odometerPhotoId, "📷 Пробег спидометра");
-    } else if (order.odometerSkipped) {
-      await sendMessage(adminChatId, "📏 Пробег: не приложен (мастер выбрал «Без пробега»)");
+    if (!order.odometerPhotoId && order.odometerSkipped) {
+      await sendMessage(adminChatId, "📏 Пробег: без фото");
     }
-    const totalDevs = order.totalDevices || 1;
+    // Слоты устройств — сводка по пропущенным обязательным фото
     const devPhotos = order.devicePhotos || {};
-    if (totalDevs > 1) {
-      for (let i = 0; i < totalDevs; i++) {
-        const fid = devPhotos[String(i)];
-        if (fid && fid !== "SKIPPED") {
-          await sendPhoto(adminChatId, fid, `📷 Устройство ${i + 1}/${totalDevs}`);
-        } else {
-          await sendMessage(adminChatId, `🔌 Устройство ${i + 1}/${totalDevs}: фото не приложено`);
-        }
+    const slots = getPhotoSlots(order);
+    for (const slot of slots) {
+      const fid = devPhotos[slot.key];
+      if (fid === "SKIPPED") {
+        await sendMessage(adminChatId, `⏭ ${slot.label}: фото пропущено`);
+      } else if (!fid && slot.required) {
+        await sendMessage(adminChatId, `⚠️ ${slot.label}: фото не предоставлено (обязательное)`);
       }
-    } else {
-      if (order.devicePhotoId || devPhotos["0"]) {
-        await sendPhoto(adminChatId, order.devicePhotoId || devPhotos["0"], "📷 Устройство / серийный номер");
-      } else if (order.deviceSkipped || devPhotos["0"] === "SKIPPED") {
-        await sendMessage(adminChatId, "🔌 Устройство: не приложено (мастер выбрал «Без устройства»)");
-      }
-    }
-    if (order.dutPhotoId) {
-      await sendPhoto(adminChatId, order.dutPhotoId, "📷 Датчик DUT");
-    } else if (order.dutSkipped) {
-      await sendMessage(adminChatId, "📡 DUT: фото не приложено (мастер выбрал «Без фото DUT»)");
     }
     // Кнопка закрытия — и обычному админу и супер-админу
     if (String(adminChatId) !== String(SUPER_ADMIN_ID)) {
@@ -2265,9 +2319,21 @@ function optionsLabel(order) {
 }
 
 function formatOrderForMaster(order) {
-  const optLine = order.type === "INSTALL" ? `📦 Устройства: ${optionsLabel(order)}` : "";
   const addrLine = order.logistics === "VISIT" ? `📍 Адрес: ${order.address || "-"}` : "";
   const commentLine = `💬 Комментарий:\n${order.adminComment || "-"}`;
+
+  let installLines = "";
+  if (order.type === "INSTALL") {
+    installLines += `📦 Устройства: ${optionsLabel(order)}\n`;
+    // Итого установок по компонентам
+    const slots = getPhotoSlots(order);
+    if (slots.length) {
+      const byDev = {};
+      for (const s of slots) byDev[s.deviceName] = (byDev[s.deviceName] || 0) + 1;
+      const summary = Object.entries(byDev).map(([n, c]) => `${n}×${c}`).join(", ");
+      installLines += `📊 Итого к установке: ${summary} (${slots.length} позиций)\n`;
+    }
+  }
 
   return (
     `${typeLabel(order)} #${order.id}\n` +
@@ -2276,7 +2342,7 @@ function formatOrderForMaster(order) {
     `👷 Мастер: ${order.masterName}\n` +
     `🚗/🏢: ${logisticsLabel(order)}\n` +
     (addrLine ? `${addrLine}\n` : "") +
-    (optLine ? `${optLine}\n` : "") +
+    installLines +
     `\n${commentLine}`
   );
 }
