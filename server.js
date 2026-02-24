@@ -449,11 +449,9 @@ function masterArrivalPhotoKeyboard(orderId, order) {
       ]);
       i += 2;
     } else {
-      // Укорачиваем метку в кнопке: убираем префикс FMB
-      const btnLabel = slot.label.replace(/FMB(\d{3})/g, '$1');
-      const row = [{ text: `📷 ${btnLabel}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
+      const row = [{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
       if (!slot.required) {
-        row.push({ text: "⏭", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
+        row.push({ text: "📷 Нет", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
       }
       rows.push(row);
       i++;
@@ -1689,6 +1687,13 @@ async function onCallback(cb) {
     order.devicePhotos[skipType] = "SKIPPED";
     const slot = getPhotoSlots(order).find(s => s.key === skipType);
     const skipLabel = slot ? slot.label : skipType;
+
+    // Моментальное уведомление админу
+    const skipAdminId = order.adminChatId || SUPER_ADMIN_ID;
+    safeSend(skipAdminId, `📷 Нет фото: ${skipLabel} — заявка #${order.id} (${order.masterName})`);
+    if (String(skipAdminId) !== String(SUPER_ADMIN_ID)) {
+      safeSend(SUPER_ADMIN_ID, `📷 Нет фото: ${skipLabel} — заявка #${order.id} (${order.masterName})`);
+    }
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     if (kb) {
