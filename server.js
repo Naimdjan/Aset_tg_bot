@@ -444,12 +444,12 @@ function masterArrivalPhotoKeyboard(orderId, order) {
       next?.unitIdx === slot.unitIdx
     ) {
       rows.push([
-        { text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` },
-        { text: `📷 ${next.label}`,  callback_data: `MASTER_PHOTO:${orderId}:${next.key}` },
+        { text: slot.label, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` },
+        { text: next.label,  callback_data: `MASTER_PHOTO:${orderId}:${next.key}` },
       ]);
       i += 2;
     } else {
-      const row = [{ text: `📷 ${slot.label}`, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
+      const row = [{ text: slot.label, callback_data: `MASTER_PHOTO:${orderId}:${slot.key}` }];
       if (!slot.required) {
         row.push({ text: "📷 Нет", callback_data: `MASTER_SKIP:${orderId}:${slot.key}` });
       }
@@ -1638,12 +1638,29 @@ async function onCallback(cb) {
     order.actualArrivalAt = new Date().toISOString();
     order.status = "CLIENT_ARRIVED";
 
-    await editMessage(
-      chatId,
-      messageId,
-      `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nНажмите нужную кнопку ниже, затем 📎 (скрепка) → «Фото» или «Камера»:`,
-      { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
-    );
+    const photoKb = masterArrivalPhotoKeyboard(orderId, order);
+
+    if (photoKb) {
+      await editMessage(
+        chatId,
+        messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nНажмите нужную кнопку ниже, затем 📎 (скрепка) → «Фото» или «Камера»:`,
+        { reply_markup: photoKb }
+      );
+    } else {
+      // Только аксессуары — фото не нужны, сразу показываем «Выполнено»
+      setState(chatId, "MASTER_WAIT_DONE", { orderId });
+      await editMessage(
+        chatId,
+        messageId,
+        `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nФото не требуются. По завершению работ нажмите «✅ Выполнено».`,
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]],
+          },
+        }
+      );
+    }
 
     if (order.adminChatId) {
       await sendMessage(
@@ -2728,15 +2745,11 @@ async function sendOrderToMaster(order) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`✅ Server started on port ${PORT}`);
-  // Меню команд: при открытии чата в (/) будет видна команда «Показать меню»
+  // Убираем кнопку «Меню» — удаляем все зарегистрированные команды
   try {
-    await tg("setMyCommands", {
-      commands: [
-        { command: "start", description: "Показать меню" },
-        { command: "getmyid", description: "Мой Telegram ID" },
-      ],
-    });
+    await tg("deleteMyCommands", {});
+    await tg("setChatMenuButton", { menu_button: { type: "default" } });
   } catch (e) {
-    console.warn("setMyCommands:", e?.message || e);
+    console.warn("deleteMyCommands:", e?.message || e);
   }
 });
