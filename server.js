@@ -26,6 +26,7 @@ function normalizePassword(s) {
 }
 const BOT_PASSWORD = normalizePassword(process.env.BOT_PASSWORD || "");
 const authorizedChatIds = new Set(); // chatId строкой
+const seenMasters = new Set();       // мастера, уже подключавшиеся (сбрасывается при рестарте)
 
 function isAuthorized(chatId) {
   return authorizedChatIds.has(String(chatId));
@@ -393,6 +394,7 @@ function masterOrderKeyboard(orderId) {
         { text: "✅ Сегодня", callback_data: `MASTER_ACCEPT:${orderId}:TODAY` },
         { text: "✅ Завтра", callback_data: `MASTER_ACCEPT:${orderId}:TOMORROW` },
       ],
+      [{ text: "📅 Другая дата", callback_data: `MASTER_ACCEPT:${orderId}:CAL` }],
     ],
   };
 }
@@ -642,6 +644,16 @@ app.post("/telegram/webhook", async (req, res) => {
 async function onMessage(message) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
+
+  // Уведомление админу при первом подключении мастера
+  if (isMasterChat(chatId) && !seenMasters.has(String(chatId))) {
+    seenMasters.add(String(chatId));
+    const master = MASTERS.find(m => String(m.tgId) === String(chatId));
+    const masterName = master ? `${master.name} (${master.city})` : String(chatId);
+    const notifyMsg = `🟢 Мастер ${masterName} впервые подключился к боту.`;
+    safeSend(SUPER_ADMIN_ID, notifyMsg);
+    if (String(ADMIN_CHAT_ID) !== String(SUPER_ADMIN_ID)) safeSend(ADMIN_CHAT_ID, notifyMsg);
+  }
 
   // Если включён пароль — проверяем доступ
   if (BOT_PASSWORD) {
@@ -1194,7 +1206,7 @@ async function onCallback(cb) {
       });
     }
 
-    const dayLabel = dayChoice === "TODAY" ? " (сегодня)" : dayChoice === "TOMORROW" ? " (завтра)" : "";
+    const dayLabel = dayChoice === "TODAY" ? " (сегодня)" : dayChoice === "TOMORROW" ? " (завтра)" : " (выбирает дату)";
     const acceptMsg = `✅ Мастер ${order.masterName} взял заявку #${order.id}${dayLabel}.`;
 
     if (order.adminChatId) {
@@ -2182,6 +2194,36 @@ async function sendPendingReport(chatId, opts = {}) {
   });
 }
 
+// Колонки устройств для сводки по мастерам
+const DEVICE_COLS = [...OPTIONS_DEVICES, ...OPTIONS_ACCESSORIES];
+
+// Строит лист "Сводка по мастерам" с отдельной колонкой на каждый тип устройства
+function buildMasterSummaryRows(items) {
+  const byMaster = {};
+  for (const o of items) {
+    const name = o.masterName || "—";
+    if (!byMaster[name]) {
+      byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0 };
+      for (const d of DEVICE_COLS) byMaster[name][d] = 0;
+    }
+    byMaster[name].total += 1;
+    if (o.type === "INSTALL") {
+      byMaster[name].installs += 1;
+      const oOpts = o.options?.length ? o.options : (o.option ? [o.option] : []);
+      for (const opt of oOpts) {
+        const qty = o.deviceQuantities?.[opt] || 1;
+        if (byMaster[name][opt] !== undefined) byMaster[name][opt] += qty;
+      }
+    } else if (o.type === "REPAIR") byMaster[name].repairs += 1;
+    if (o.logistics === "VISIT") byMaster[name].visits += 1;
+  }
+  let rows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", ...DEVICE_COLS]];
+  Object.entries(byMaster).forEach(([name, s]) =>
+    rows.push([name, s.total, s.installs, s.repairs, s.visits, ...DEVICE_COLS.map(d => s[d])])
+  );
+  return addTotalsRow(rows);
+}
+
 // Хелпер: добавить строку ИТОГО в конец массива строк
 function addTotalsRow(rows, label = "ИТОГО") {
   if (rows.length <= 1) return rows;
@@ -2269,28 +2311,7 @@ function buildExcelReport(from, to, opts = {}) {
   optionRows = addTotalsRow(optionRows);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(optionRows), "Сводка по видам");
 
-  // Сводка по мастерам — с выездами, устройствами и аксессуарами отдельно
-  const byMaster = {};
-  for (const o of items) {
-    const name = o.masterName || "—";
-    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0, devices: 0, accessories: 0 };
-    byMaster[name].total += 1;
-    if (o.type === "INSTALL") {
-      byMaster[name].installs += 1;
-      const oOpts = o.options?.length ? o.options : (o.option ? [o.option] : []);
-      for (const opt of oOpts) {
-        const qty = o.deviceQuantities?.[opt] || 1;
-        if (OPTIONS_DEVICES.includes(opt))     byMaster[name].devices     += qty;
-        else if (OPTIONS_ACCESSORIES.includes(opt)) byMaster[name].accessories += qty;
-      }
-    } else if (o.type === "REPAIR") byMaster[name].repairs += 1;
-    if (o.logistics === "VISIT") byMaster[name].visits += 1;
-  }
-  let masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", "Устройств", "Аксессуаров"]];
-  Object.entries(byMaster).forEach(([name, s]) =>
-    masterRows.push([name, s.total, s.installs, s.repairs, s.visits, s.devices, s.accessories])
-  );
-  masterRows = addTotalsRow(masterRows);
+  const masterRows = buildMasterSummaryRows(items);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRows), "Сводка по мастерам");
 
   const tmpDir = os.tmpdir();
@@ -2377,21 +2398,8 @@ function buildExcelReportPending(opts = {}) {
   optionRows = addTotalsRow(optionRows);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(optionRows), "Сводка по видам");
 
-  const byMaster = {};
-  for (const o of items) {
-    const name = o.masterName || "—";
-    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0, devices: 0 };
-    byMaster[name].total += 1;
-    if (o.type === "INSTALL") { byMaster[name].installs += 1; byMaster[name].devices += o.totalDevices || 1; }
-    else if (o.type === "REPAIR") byMaster[name].repairs += 1;
-    if (o.logistics === "VISIT") byMaster[name].visits += 1;
-  }
-  let masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", "Устройств"]];
-  Object.entries(byMaster).forEach(([name, s]) =>
-    masterRows.push([name, s.total, s.installs, s.repairs, s.visits, s.devices])
-  );
-  masterRows = addTotalsRow(masterRows);
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRows), "Сводка по мастерам");
+  const masterRowsPending = buildMasterSummaryRows(items);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRowsPending), "Сводка по мастерам");
 
   const tmpDir = os.tmpdir();
   const filePath = path.join(tmpDir, `Ожидающие_заявки_${Date.now()}.xlsx`);
