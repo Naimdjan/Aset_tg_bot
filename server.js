@@ -17,7 +17,14 @@ if (!BOT_TOKEN) console.error("❌ BOT_TOKEN not found in environment variables"
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // Пароль для доступа к боту (если задан — после /start нужно ввести пароль)
-const BOT_PASSWORD = (process.env.BOT_PASSWORD || "").trim().replace(/\r$/, "");
+function normalizePassword(s) {
+  if (!s || typeof s !== "string") return "";
+  let t = s.trim().replace(/\r/g, "");
+  const m = t.match(/^["']?(.+?)["']?$/);
+  if (m) t = m[1].trim();
+  return t;
+}
+const BOT_PASSWORD = normalizePassword(process.env.BOT_PASSWORD || "");
 const authorizedChatIds = new Set(); // chatId строкой
 
 function isAuthorized(chatId) {
@@ -125,8 +132,7 @@ function adminMenuReplyKeyboard() {
   return {
     keyboard: [
       [{ text: "📝 Новая заявка (монтаж)" }, { text: "🧰 Ремонт / другое" }],
-      [{ text: "🆔 Мой ID" }, { text: "❌ Отмена" }],
-      [{ text: "📊 Отчёт" }],
+      [{ text: "❌ Отмена" }, { text: "📊 Отчёт" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -137,8 +143,7 @@ function adminMenuReplyKeyboard() {
 function masterMenuReplyKeyboard() {
   return {
     keyboard: [
-      [{ text: "📊 Отчёт" }],
-      [{ text: "🆔 Мой ID" }, { text: "❌ Отмена" }],
+      [{ text: "📊 Отчёт" }, { text: "❌ Отмена" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -183,19 +188,76 @@ function logisticsKeyboard() {
   };
 }
 
-// Клавиатура выбора периода отчёта
+// Клавиатура выбора типа/периода отчёта
 function reportPeriodKeyboard() {
   return {
     inline_keyboard: [
       [
+        { text: "📅 Сегодня", callback_data: "REPORT_PERIOD:TODAY" },
+        { text: "📅 Вчера", callback_data: "REPORT_PERIOD:YESTERDAY" },
+      ],
+      [
         { text: "📅 Текущий месяц", callback_data: "REPORT_PERIOD:THIS_MONTH" },
         { text: "📅 Прошлый месяц", callback_data: "REPORT_PERIOD:LAST_MONTH" },
       ],
-      [{ text: "📅 Последние 7 дней", callback_data: "REPORT_PERIOD:LAST_7" }],
-      [{ text: "📅 Свой период", callback_data: "REPORT_PERIOD:CUSTOM" }],
+      [
+        { text: "📅 Последние 7 дней", callback_data: "REPORT_PERIOD:LAST_7" },
+        { text: "📅 Свой период", callback_data: "REPORT_PERIOD:CUSTOM" },
+      ],
+      [{ text: "📅 Календарь", callback_data: "REPORT_PERIOD:PERIOD" }],
+      [{ text: "📋 Ожидающие заявки", callback_data: "REPORT_PERIOD:PENDING" }],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
   };
+}
+
+// Компактный календарь для выбора даты отчёта (только дата, без времени)
+function reportCalendarKeyboard(mode, yyyymm) {
+  const prefix = mode === "START" ? "RP_START" : "RP_END";
+  const parsed = parseYyyymm(yyyymm);
+  const now = new Date();
+  const year = parsed?.y || now.getFullYear();
+  const month = parsed?.mo || now.getMonth() + 1;
+
+  const first = new Date(year, month - 1, 1);
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const jsDow = first.getDay();
+  const dow = (jsDow + 6) % 7;
+
+  const prevMonth = new Date(year, month - 2, 1);
+  const nextMonth = new Date(year, month, 1);
+  const prevYyyymm = formatYyyymm(prevMonth.getFullYear(), prevMonth.getMonth() + 1);
+  const nextYyyymm = formatYyyymm(nextMonth.getFullYear(), nextMonth.getMonth() + 1);
+
+  const rows = [];
+  rows.push([
+    { text: "‹", callback_data: `${prefix}_MN:${prevYyyymm}` },
+    { text: monthLabelShort(year, month), callback_data: "NOOP" },
+    { text: "›", callback_data: `${prefix}_MN:${nextYyyymm}` },
+  ]);
+
+  let day = 1;
+  for (let week = 0; week < 6; week++) {
+    const row = [];
+    for (let i = 0; i < 7; i++) {
+      if (week === 0 && i < dow) {
+        row.push({ text: "·", callback_data: "NOOP" });
+        continue;
+      }
+      if (day > daysInMonth) {
+        row.push({ text: "·", callback_data: "NOOP" });
+        continue;
+      }
+      const yyyymmdd = `${year}${pad2(month)}${pad2(day)}`;
+      row.push({ text: String(day), callback_data: `${prefix}_MD:${yyyymmdd}` });
+      day++;
+    }
+    rows.push(row);
+    if (day > daysInMonth) break;
+  }
+
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
 }
 
 // Клавиатура для мастера по заявке
@@ -385,22 +447,23 @@ async function onMessage(message) {
   if (BOT_PASSWORD) {
     const st = getState(chatId);
     if (!isAuthorized(chatId)) {
+      const enteredPassword = normalizePassword(text);
+      // Принимаем пароль в любом случае (даже без /start), чтобы не ломаться при потере состояния
+      if (enteredPassword && enteredPassword === BOT_PASSWORD) {
+        setAuthorized(chatId);
+        clearState(chatId);
+        await sendMessage(chatId, "✅ Доступ разрешён. Меню активировано.", {
+          reply_markup: menuKeyboardForChat(chatId),
+        });
+        return;
+      }
       if (text.startsWith("/start")) {
         setState(chatId, "WAIT_PASSWORD", {});
         await sendMessage(chatId, "🔐 Введите пароль для доступа к боту:");
         return;
       }
       if (st && st.step === "WAIT_PASSWORD") {
-        const enteredPassword = text.replace(/\r$/, "").trim();
-        if (enteredPassword === BOT_PASSWORD) {
-          setAuthorized(chatId);
-          clearState(chatId);
-          await sendMessage(chatId, "✅ Доступ разрешён. Меню активировано.", {
-            reply_markup: menuKeyboardForChat(chatId),
-          });
-          return;
-        }
-        await sendMessage(chatId, "❌ Неверный пароль. Нажмите /start и введите пароль снова.");
+        await sendMessage(chatId, "❌ Неверный пароль. Введите пароль ещё раз или нажмите /start.");
         return;
       }
       await sendMessage(chatId, "🔐 Доступ закрыт. Введите /start и укажите пароль.");
@@ -414,14 +477,6 @@ async function onMessage(message) {
     return;
   }
   if (text === "/getmyid") {
-    await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`, {
-      reply_markup: menuKeyboardForChat(chatId),
-    });
-    return;
-  }
-
-  // Кнопки (Reply Keyboard) — работают как обычный текст
-  if (text === "🆔 Мой ID") {
     await sendMessage(chatId, `Ваш Telegram ID: ${message.from?.id}\nChat ID: ${chatId}`, {
       reply_markup: menuKeyboardForChat(chatId),
     });
@@ -643,7 +698,7 @@ async function onCallback(cb) {
     return;
   }
 
-  // ADMIN: выбор периода отчёта
+  // Выбор типа/периода отчёта
   if (data.startsWith("REPORT_PERIOD:")) {
     const st = getState(chatId);
     if (!st || st.step !== "REPORT_WAIT_PERIOD") {
@@ -657,7 +712,21 @@ async function onCallback(cb) {
     const scope = st.data.scope || "ADMIN";
     const masterTgId = st.data.masterTgId || null;
 
-    // Произвольный период — запросим ввод дат
+    if (code === "PENDING") {
+      await sendPendingReport(chatId, { scope, masterTgId });
+      return;
+    }
+
+    if (code === "PERIOD") {
+      const now = new Date();
+      const yyyymm = formatYyyymm(now.getFullYear(), now.getMonth() + 1);
+      setState(chatId, "REPORT_PICK_START", { scope, masterTgId, yyyymm });
+      await editMessage(chatId, messageId, "📅 Выберите дату начала периода:", {
+        reply_markup: reportCalendarKeyboard("START", yyyymm),
+      });
+      return;
+    }
+
     if (code === "CUSTOM") {
       setState(chatId, "REPORT_WAIT_RANGE", { scope, masterTgId });
       await editMessage(
@@ -669,6 +738,7 @@ async function onCallback(cb) {
       return;
     }
 
+    // TODAY / YESTERDAY / THIS_MONTH / LAST_MONTH / LAST_7
     const { from, to } = calcPresetPeriod(code);
     clearState(chatId);
     await editMessage(
@@ -680,24 +750,88 @@ async function onCallback(cb) {
     return;
   }
 
+  // Календарь отчёта: навигация по месяцу (начало периода)
+  if (data.startsWith("RP_START_MN:")) {
+    const yyyymm = data.split(":")[1];
+    const st = getState(chatId);
+    if (!st || st.step !== "REPORT_PICK_START") return;
+    setState(chatId, "REPORT_PICK_START", { ...st.data, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату начала периода:", {
+      reply_markup: reportCalendarKeyboard("START", yyyymm),
+    });
+    return;
+  }
+
+  // Календарь отчёта: выбрана дата начала
+  if (data.startsWith("RP_START_MD:")) {
+    const yyyymmdd = data.split(":")[1];
+    const st = getState(chatId);
+    if (!st || st.step !== "REPORT_PICK_START") return;
+    const scope = st.data.scope || "ADMIN";
+    const masterTgId = st.data.masterTgId || null;
+    const d = parseYyyymmdd(yyyymmdd);
+    if (!d) return;
+    const fromDate = new Date(d.y, d.mo - 1, d.d);
+    setState(chatId, "REPORT_PICK_END", { scope, masterTgId, fromTs: fromDate.getTime(), yyyymm: yyyymmdd.slice(0, 6) });
+    await editMessage(chatId, messageId, "📅 Выберите дату окончания периода:", {
+      reply_markup: reportCalendarKeyboard("END", yyyymmdd.slice(0, 6)),
+    });
+    return;
+  }
+
+  // Календарь отчёта: навигация по месяцу (конец периода)
+  if (data.startsWith("RP_END_MN:")) {
+    const yyyymm = data.split(":")[1];
+    const st = getState(chatId);
+    if (!st || st.step !== "REPORT_PICK_END") return;
+    setState(chatId, "REPORT_PICK_END", { ...st.data, yyyymm });
+    await editMessage(chatId, messageId, "📅 Выберите дату окончания периода:", {
+      reply_markup: reportCalendarKeyboard("END", yyyymm),
+    });
+    return;
+  }
+
+  // Календарь отчёта: выбрана дата окончания — формируем отчёт
+  if (data.startsWith("RP_END_MD:")) {
+    const yyyymmdd = data.split(":")[1];
+    const st = getState(chatId);
+    if (!st || st.step !== "REPORT_PICK_END") return;
+    const scope = st.data.scope || "ADMIN";
+    const masterTgId = st.data.masterTgId || null;
+    const fromTs = st.data.fromTs;
+    const d = parseYyyymmdd(yyyymmdd);
+    if (!d || fromTs == null) return;
+    const fromDate = new Date(fromTs);
+    const toDate = new Date(d.y, d.mo - 1, d.d, 23, 59, 59, 999);
+    if (toDate.getTime() < fromDate.getTime()) toDate.setTime(fromDate.getTime());
+    clearState(chatId);
+    await editMessage(chatId, messageId, `📊 Отчёт за период ${formatDate(fromDate)}–${formatDate(toDate)} формируется...`);
+    await sendTextReport(chatId, fromDate, toDate, { scope, masterTgId });
+    return;
+  }
+
   // Отправить отчёт в Excel (после просмотра текстового отчёта)
   if (data === "REPORT_EXCEL") {
     const st = getState(chatId);
-    if (!st || st.step !== "REPORT_SENT" || st.data.fromTs == null || st.data.toTs == null) {
-      await sendMessage(chatId, "⚠️ Сначала выберите период и сформируйте отчёт (📊 Отчёт).", {
+    if (!st || st.step !== "REPORT_SENT") {
+      await sendMessage(chatId, "⚠️ Сначала сформируйте отчёт (📊 Отчёт).", {
         reply_markup: menuKeyboardForChat(chatId),
       });
       return;
     }
-    const from = new Date(st.data.fromTs);
-    const to = new Date(st.data.toTs);
     const scope = st.data.scope || "ADMIN";
     const masterTgId = st.data.masterTgId || null;
     let filePath;
     try {
-      filePath = buildExcelReport(from, to, { scope, masterTgId });
-      const caption = `📊 Отчёт ${formatDate(from)}–${formatDate(to)}`;
-      await sendDocument(chatId, filePath, caption);
+      if (st.data.pending) {
+        filePath = buildExcelReportPending({ scope, masterTgId });
+        await sendDocument(chatId, filePath, "📋 Ожидающие заявки");
+      } else {
+        const from = new Date(st.data.fromTs);
+        const to = new Date(st.data.toTs);
+        filePath = buildExcelReport(from, to, { scope, masterTgId });
+        await sendDocument(chatId, filePath, `📊 Отчёт ${formatDate(from)}–${formatDate(to)}`);
+      }
       fs.unlink(filePath, () => {});
     } catch (err) {
       console.error("Excel report error:", err);
@@ -1272,6 +1406,19 @@ function formatTimeInTz(d, tz = REPORT_TIMEZONE) {
 function calcPresetPeriod(code) {
   const now = new Date();
 
+  if (code === "TODAY") {
+    const from = startOfDay(now);
+    const to = endOfDay(now);
+    return { from, to };
+  }
+
+  if (code === "YESTERDAY") {
+    const yest = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const from = startOfDay(yest);
+    const to = endOfDay(yest);
+    return { from, to };
+  }
+
   if (code === "LAST_7") {
     const to = endOfDay(now);
     const from = startOfDay(new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000));
@@ -1325,6 +1472,20 @@ function getReportItems(from, to, opts = {}) {
     if (!o.createdAt) return false;
     const t = new Date(o.createdAt).getTime();
     if (t < from.getTime() || t > to.getTime()) return false;
+    if (scope === "MASTER" && masterTgId != null) {
+      return String(o.masterTgId) === String(masterTgId);
+    }
+    return true;
+  });
+}
+
+// Ожидающие заявки (статус не DONE)
+function getPendingReportItems(opts = {}) {
+  const scope = opts.scope || "ADMIN";
+  const masterTgId = opts.masterTgId || null;
+  const all = Array.from(orders.values());
+  return all.filter((o) => {
+    if (o.status === "DONE") return false;
     if (scope === "MASTER" && masterTgId != null) {
       return String(o.masterTgId) === String(masterTgId);
     }
@@ -1399,6 +1560,43 @@ async function sendTextReport(chatId, from, to, opts = {}) {
     inline_keyboard: [[{ text: "📥 Отправить в Excel", callback_data: "REPORT_EXCEL" }]],
   };
   await sendMessage(chatId, text, { reply_markup: reportKeyboard });
+}
+
+// Текстовый отчёт по ожидающим заявкам
+async function sendPendingReport(chatId, opts = {}) {
+  const scope = opts.scope || "ADMIN";
+  const masterTgId = opts.masterTgId || null;
+  const items = getPendingReportItems(opts);
+
+  if (!items.length) {
+    await sendMessage(
+      chatId,
+      scope === "MASTER" ? "📋 Ожидающих заявок у вас нет." : "📋 Ожидающих заявок нет.",
+      { reply_markup: menuKeyboardForChat(chatId) }
+    );
+    return;
+  }
+
+  const byStatus = {};
+  for (const o of items) {
+    const s = o.status || "—";
+    byStatus[s] = (byStatus[s] || 0) + 1;
+  }
+  const statusLines = Object.entries(byStatus)
+    .map(([s, cnt]) => `• ${s}: ${cnt}`)
+    .join("\n");
+
+  let header = "📋 Ожидающие заявки";
+  if (scope === "MASTER" && masterTgId != null) {
+    const m = MASTERS.find((mm) => String(mm.tgId) === String(masterTgId));
+    if (m) header += `\n👷 Мастер: ${m.name}`;
+  }
+  const text = `${header}\n\nВсего: ${items.length}\n\nПо статусам:\n${statusLines}`;
+
+  setState(chatId, "REPORT_SENT", { pending: true, scope, masterTgId });
+  await sendMessage(chatId, text, {
+    reply_markup: { inline_keyboard: [[{ text: "📥 Отправить в Excel", callback_data: "REPORT_EXCEL" }]] },
+  });
 }
 
 // Сборка Excel-файла отчёта, возвращает путь к временному файлу
@@ -1493,6 +1691,85 @@ function buildExcelReport(from, to, opts = {}) {
       ? `Установки_${fromStr}.xlsx`
       : `Установки_${fromStr}-${toStr}.xlsx`;
   const filePath = path.join(tmpDir, filename);
+  XLSX.writeFile(wb, filePath);
+  return filePath;
+}
+
+// Excel по ожидающим заявкам (та же структура листов)
+function buildExcelReportPending(opts = {}) {
+  const items = getPendingReportItems(opts);
+
+  const rows = [
+    [
+      "№",
+      "Время начала",
+      "Время завершения",
+      "Тип",
+      "Вид монтажа",
+      "Город",
+      "Мастер",
+      "Логистика",
+      "Адрес",
+      "Телефон",
+      "Комментарий",
+      "Статус",
+    ],
+  ];
+
+  function datetimeInTz(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return `${formatDateInTz(d)} ${formatTimeInTz(d)}`;
+  }
+
+  items.forEach((o, i) => {
+    const dStart = o.createdAt ? new Date(o.createdAt) : null;
+    const dEnd = o.completedAt ? new Date(o.completedAt) : null;
+    rows.push([
+      i + 1,
+      dStart ? datetimeInTz(o.createdAt) : "",
+      dEnd ? datetimeInTz(o.completedAt) : "",
+      o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
+      o.type === "INSTALL" ? (o.option || "—") : "—",
+      o.city || "—",
+      o.masterName || "—",
+      o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
+      o.address || "—",
+      o.phone || "—",
+      (o.adminComment || "").replace(/\n/g, " "),
+      o.status || "—",
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Заявки");
+
+  const installs = items.filter((o) => o.type === "INSTALL");
+  const byOption = {};
+  for (const o of installs) {
+    const opt = o.option || "—";
+    byOption[opt] = (byOption[opt] || 0) + 1;
+  }
+  const optionRows = [["Вид монтажа", "Количество"]];
+  Object.entries(byOption).forEach(([opt, cnt]) => optionRows.push([opt, cnt]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(optionRows), "Сводка по видам");
+
+  const byMaster = {};
+  for (const o of items) {
+    const name = o.masterName || "—";
+    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0 };
+    byMaster[name].total += 1;
+    if (o.type === "INSTALL") byMaster[name].installs += 1;
+    else if (o.type === "REPAIR") byMaster[name].repairs += 1;
+  }
+  const masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое"]];
+  Object.entries(byMaster).forEach(([name, stats]) => masterRows.push([name, stats.total, stats.installs, stats.repairs]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRows), "Сводка по мастерам");
+
+  const tmpDir = os.tmpdir();
+  const filePath = path.join(tmpDir, `Ожидающие_заявки_${Date.now()}.xlsx`);
   XLSX.writeFile(wb, filePath);
   return filePath;
 }
