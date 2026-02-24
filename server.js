@@ -302,47 +302,52 @@ function masterOrderKeyboard(orderId) {
         { text: "✅ Беру сегодня", callback_data: `MASTER_ACCEPT:${orderId}:TODAY` },
         { text: "✅ Беру завтра", callback_data: `MASTER_ACCEPT:${orderId}:TOMORROW` },
       ],
-      [{ text: "❌ Не могу", callback_data: `MASTER_DECLINE:${orderId}` }],
     ],
   };
 }
 
-// Кнопки для фото по прибытии клиента: фото или «Без номера»/«Без пробега»
+// Кнопки для фото по прибытии клиента: фото или «Без …»
 function masterArrivalPhotoKeyboard(orderId, order) {
   const rows = [];
-  const hasNumber = order.carNumberPhotoId || order.carNumberSkipped;
-  const hasOdometer = order.odometerPhotoId || order.odometerSkipped;
-  const hasDevice = order.devicePhotoId || order.deviceSkipped;
 
-  // DUT: нужно фото если в выбранных устройствах есть DUT
-  const allOptions = order.options && order.options.length ? order.options : (order.option ? [order.option] : []);
-  const needDut = allOptions.some(o => o.includes("DUT"));
-  const hasDut = order.dutPhotoId || order.dutSkipped;
-
-  if (!hasNumber) {
+  if (!order.carNumberPhotoId && !order.carNumberSkipped) {
     rows.push([
       { text: "📷 Фото номера", callback_data: `MASTER_PHOTO:${orderId}:PLATE` },
       { text: "⏭ Без номера", callback_data: `MASTER_SKIP:${orderId}:PLATE` },
     ]);
   }
-  if (!hasOdometer) {
+  if (!order.odometerPhotoId && !order.odometerSkipped) {
     rows.push([
       { text: "📷 Фото пробега", callback_data: `MASTER_PHOTO:${orderId}:ODOMETER` },
       { text: "⏭ Без пробега", callback_data: `MASTER_SKIP:${orderId}:ODOMETER` },
     ]);
   }
-  if (!hasDevice) {
-    rows.push([
-      { text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` },
-      { text: "⏭ Без устройства", callback_data: `MASTER_SKIP:${orderId}:DEVICE` },
-    ]);
+
+  // Фото для каждого устройства по отдельности
+  const totalDevs = order.totalDevices || 1;
+  const devPhotos = order.devicePhotos || {};
+  for (let i = 0; i < totalDevs; i++) {
+    const done = devPhotos[String(i)] !== undefined ||
+      (i === 0 && (order.devicePhotoId || order.deviceSkipped));
+    if (!done) {
+      const label = totalDevs > 1 ? `устройства ${i + 1}/${totalDevs}` : "устройства";
+      rows.push([
+        { text: `📷 Фото ${label}`, callback_data: `MASTER_PHOTO:${orderId}:DEVICE_${i}` },
+        { text: "⏭ Без фото", callback_data: `MASTER_SKIP:${orderId}:DEVICE_${i}` },
+      ]);
+    }
   }
-  if (needDut && !hasDut) {
+
+  // DUT — нужно фото если в устройствах есть DUT
+  const allOptions = order.options?.length ? order.options : (order.option ? [order.option] : []);
+  const needDut = allOptions.some(o => o.includes("DUT"));
+  if (needDut && !order.dutPhotoId && !order.dutSkipped) {
     rows.push([
       { text: "📷 Фото DUT", callback_data: `MASTER_PHOTO:${orderId}:DUT` },
       { text: "⏭ Без фото DUT", callback_data: `MASTER_SKIP:${orderId}:DUT` },
     ]);
   }
+
   if (rows.length === 0) return null;
   return { inline_keyboard: rows };
 }
@@ -462,6 +467,17 @@ function optionsKeyboard(orderId, selected = []) {
   }
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
+}
+
+// Клавиатура выбора количества устройства (1-10)
+function qtyKeyboard(orderId) {
+  return {
+    inline_keyboard: [
+      [1, 2, 3, 4, 5].map(n => ({ text: String(n), callback_data: `ADMIN_QTY:${orderId}:${n}` })),
+      [6, 7, 8, 9, 10].map(n => ({ text: String(n), callback_data: `ADMIN_QTY:${orderId}:${n}` })),
+      [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+    ],
+  };
 }
 
 // =============================
@@ -644,8 +660,11 @@ async function onMessage(message) {
   // ADMIN: ждём телефон
   if (st.step === "ADMIN_WAIT_PHONE") {
     const phoneDigits = text.replace(/\D/g, "");
-    if (!/^\d{9}$/.test(phoneDigits)) {
-      await sendMessage(chatId, "⚠️ Номер телефона должен содержать строго 9 цифр (без кода страны). Попробуйте ещё раз.", {
+    if (phoneDigits.length !== 9) {
+      const hint = phoneDigits.length < 9
+        ? `Введено ${phoneDigits.length} цифр — не хватает ${9 - phoneDigits.length}.`
+        : `Введено ${phoneDigits.length} цифр — лишние ${phoneDigits.length - 9}.`;
+      await sendMessage(chatId, `⚠️ Номер телефона должен содержать строго 9 цифр (без кода страны).\n${hint}\nПопробуйте ещё раз.`, {
         reply_markup: adminMenuReplyKeyboard(),
       });
       return;
@@ -741,6 +760,12 @@ async function onMessage(message) {
     if (photoType === "PLATE") order.carNumberPhotoId = fileId;
     else if (photoType === "ODOMETER") order.odometerPhotoId = fileId;
     else if (photoType === "DEVICE") order.devicePhotoId = fileId;
+    else if (photoType.startsWith("DEVICE_")) {
+      const idx = photoType.split("_")[1];
+      if (!order.devicePhotos) order.devicePhotos = {};
+      order.devicePhotos[idx] = fileId;
+      if (idx === "0") order.devicePhotoId = fileId; // backward compat
+    }
     else if (photoType === "DUT") order.dutPhotoId = fileId;
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
@@ -1061,6 +1086,22 @@ async function onCallback(cb) {
     const [, orderId, yyyymmdd] = data.split(":");
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+
+    const dp = parseYyyymmdd(yyyymmdd);
+    if (dp) {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const chosen = new Date(dp.y, dp.mo - 1, dp.d);
+      if (chosen < today) {
+        await editMessage(
+          chatId, messageId,
+          `⚠️ Нельзя выбрать прошедшую дату (${pad2(dp.d)}.${pad2(dp.mo)}.${dp.y}).\nВыберите сегодня или позже:`,
+          { reply_markup: masterCalendarKeyboard(orderId, yyyymmdd.slice(0, 6)) }
+        );
+        return;
+      }
+    }
+
     setState(chatId, "MASTER_PICK_HOUR", { orderId, yyyymmdd });
     await editMessage(chatId, messageId, "🕒 Выберите час:", {
       reply_markup: masterHourKeyboard(orderId, yyyymmdd),
@@ -1076,6 +1117,18 @@ async function onCallback(cb) {
 
     const d = parseYyyymmdd(yyyymmdd);
     if (!d) return;
+
+    // Проверка прошедшего времени
+    const chosen = new Date(d.y, d.mo - 1, d.d, Number(hh), 0);
+    if (chosen <= new Date()) {
+      await editMessage(
+        chatId, messageId,
+        `⚠️ Нельзя выбрать прошедшее время (${hh}:00 ${pad2(d.d)}.${pad2(d.mo)}.${d.y}).\nВыберите более позднее время:`,
+        { reply_markup: masterHourKeyboard(orderId, yyyymmdd) }
+      );
+      return;
+    }
+
     const timeText = `${pad2(d.d)}.${pad2(d.mo)}.${d.y} ${hh}:00`;
 
     order.masterSuggestedTimeText = timeText;
@@ -1234,8 +1287,15 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
-    const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства / серийного номера", DUT: "датчика DUT" };
-    const label = labels[photoType] || "фото";
+    const labels = { PLATE: "номера автомобиля", ODOMETER: "пробега спидометра", DEVICE: "устройства", DUT: "датчика DUT" };
+    let label;
+    if (photoType.startsWith("DEVICE_")) {
+      const idx = parseInt(photoType.split("_")[1]);
+      const totalDevs = order.totalDevices || 1;
+      label = totalDevs > 1 ? `устройства ${idx + 1}/${totalDevs}` : "устройства";
+    } else {
+      label = labels[photoType] || "фото";
+    }
 
     setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
     await editMessage(
@@ -1263,6 +1323,13 @@ async function onCallback(cb) {
     } else if (skipType === "DEVICE") {
       order.deviceSkipped = true;
       skipLabel = "устройства";
+    } else if (skipType.startsWith("DEVICE_")) {
+      const idx = skipType.split("_")[1];
+      if (!order.devicePhotos) order.devicePhotos = {};
+      order.devicePhotos[idx] = "SKIPPED";
+      if (idx === "0") order.deviceSkipped = true;
+      const totalDevs = order.totalDevices || 1;
+      skipLabel = totalDevs > 1 ? `устройства ${parseInt(idx) + 1}/${totalDevs}` : "устройства";
     } else if (skipType === "DUT") {
       order.dutSkipped = true;
       skipLabel = "фото DUT";
@@ -1322,10 +1389,23 @@ async function onCallback(cb) {
     } else if (order.odometerSkipped) {
       await sendMessage(adminChatId, "📏 Пробег: не приложен (мастер выбрал «Без пробега»)");
     }
-    if (order.devicePhotoId) {
-      await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
-    } else if (order.deviceSkipped) {
-      await sendMessage(adminChatId, "🔌 Устройство: не приложено (мастер выбрал «Без устройства»)");
+    const totalDevs = order.totalDevices || 1;
+    const devPhotos = order.devicePhotos || {};
+    if (totalDevs > 1) {
+      for (let i = 0; i < totalDevs; i++) {
+        const fid = devPhotos[String(i)];
+        if (fid && fid !== "SKIPPED") {
+          await sendPhoto(adminChatId, fid, `📷 Устройство ${i + 1}/${totalDevs}`);
+        } else {
+          await sendMessage(adminChatId, `🔌 Устройство ${i + 1}/${totalDevs}: фото не приложено`);
+        }
+      }
+    } else {
+      if (order.devicePhotoId || devPhotos["0"]) {
+        await sendPhoto(adminChatId, order.devicePhotoId || devPhotos["0"], "📷 Устройство / серийный номер");
+      } else if (order.deviceSkipped || devPhotos["0"] === "SKIPPED") {
+        await sendMessage(adminChatId, "🔌 Устройство: не приложено (мастер выбрал «Без устройства»)");
+      }
     }
     if (order.dutPhotoId) {
       await sendPhoto(adminChatId, order.dutPhotoId, "📷 Датчик DUT");
@@ -1428,7 +1508,11 @@ async function onCallback(cb) {
       dutPhotoId: null,
       dutSkipped: false,
 
+      devicePhotos: {},   // { "0": fileId|"SKIPPED", "1": ... }
+
       options: [],
+      deviceQuantities: {},  // { "FMB920": 2, "FMB125+DUT": 1 }
+      totalDevices: 0,       // сумма всех количеств
       acceptPlannedDayAt: null,
 
       status: "NEW",
@@ -1629,14 +1713,61 @@ async function onCallback(cb) {
     order.options = selectedOpts.map(i => OPTIONS[i]);
     order.option = order.options[0]; // backward compat
 
+    // Запрашиваем количество для первого устройства
+    setState(chatId, "ADMIN_WAIT_QTY", { orderId, qtyIdx: 0, quantities: {} });
+    await editMessage(
+      chatId, messageId,
+      `✅ Выбрано: ${order.options.join(", ")}\n\n🔢 Сколько ${order.options[0]}?`,
+      { reply_markup: qtyKeyboard(orderId) }
+    );
+    return;
+  }
+
+  // ADMIN: ввод количества для устройства
+  if (data.startsWith("ADMIN_QTY:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_WAIT_QTY") {
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+
+    const parts = data.split(":");
+    const orderId = parts[1];
+    const qty = Number(parts[2]);
+    const order = orders.get(orderId);
+    if (!order) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+
+    const { qtyIdx, quantities } = st.data;
+    const deviceName = order.options[qtyIdx];
+    quantities[deviceName] = qty;
+
+    const nextIdx = qtyIdx + 1;
+    if (nextIdx < order.options.length) {
+      setState(chatId, "ADMIN_WAIT_QTY", { orderId, qtyIdx: nextIdx, quantities });
+      await editMessage(
+        chatId, messageId,
+        `✅ ${deviceName}: ${qty} шт.\n\n🔢 Сколько ${order.options[nextIdx]}?`,
+        { reply_markup: qtyKeyboard(orderId) }
+      );
+      return;
+    }
+
+    // Все количества заполнены
+    order.deviceQuantities = { ...quantities };
+    order.totalDevices = Object.values(quantities).reduce((a, b) => a + b, 0);
+
+    const qtyText = order.options.map(o => `${o} × ${quantities[o]}`).join(", ");
     setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
 
     const hint =
       "✍️ Напишите комментарий.\n" +
-      "Например: «поставить реле, SIM клиента, серийники позже»\n" +
-      "или «Другая модель: …»";
+      "Например: «поставить реле, SIM клиента, серийники позже»";
 
-    await editMessage(chatId, messageId, `✅ Выбрано: ${order.options.join(", ")}\n\n${hint}`, {
+    await editMessage(chatId, messageId, `✅ Устройства: ${qtyText}\n\n${hint}`, {
       reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
     });
     return;
@@ -1913,6 +2044,19 @@ async function sendPendingReport(chatId, opts = {}) {
   });
 }
 
+// Хелпер: добавить строку ИТОГО в конец массива строк
+function addTotalsRow(rows, label = "ИТОГО") {
+  if (rows.length <= 1) return rows;
+  const header = rows[0];
+  const totals = header.map((_, ci) => {
+    if (ci === 0) return label;
+    const nums = rows.slice(1).map(r => (typeof r[ci] === "number" ? r[ci] : 0));
+    const sum = nums.reduce((a, b) => a + b, 0);
+    return nums.some(n => n !== 0) ? sum : "";
+  });
+  return [...rows, totals];
+}
+
 // Сборка Excel-файла отчёта, возвращает путь к временному файлу
 function buildExcelReport(from, to, opts = {}) {
   const items = getReportItems(from, to, opts);
@@ -1920,12 +2064,15 @@ function buildExcelReport(from, to, opts = {}) {
   const rows = [
     [
       "№",
-      "Дата начала",
-      "Время начала",
-      "Дата завершения",
-      "Время завершения",
+      "Дата создания",
+      "Время создания",
+      "Дата выполнения (мастер)",
+      "Время выполнения (мастер)",
+      "Дата закрытия (админ)",
+      "Время закрытия (админ)",
       "Тип",
-      "Вид монтажа",
+      "Устройства",
+      "Кол-во уст.",
       "Город",
       "Мастер",
       "Логистика",
@@ -1938,16 +2085,20 @@ function buildExcelReport(from, to, opts = {}) {
   ];
 
   items.forEach((o, i) => {
-    const dStart = o.createdAt ? new Date(o.createdAt) : null;
-    const dEnd = o.completedAt ? new Date(o.completedAt) : null;
+    const dStart   = o.createdAt   ? new Date(o.createdAt)   : null;
+    const dDone    = o.completedAt ? new Date(o.completedAt) : null;
+    const dClosed  = o.closedAt    ? new Date(o.closedAt)    : null;
     rows.push([
       i + 1,
-      dStart ? formatDateInTz(dStart) : "",
-      dStart ? formatTimeInTz(dStart) : "",
-      dEnd ? formatDateInTz(dEnd) : "",
-      dEnd ? formatTimeInTz(dEnd) : "",
+      dStart  ? formatDateInTz(dStart)  : "",
+      dStart  ? formatTimeInTz(dStart)  : "",
+      dDone   ? formatDateInTz(dDone)   : "",
+      dDone   ? formatTimeInTz(dDone)   : "",
+      dClosed ? formatDateInTz(dClosed) : "",
+      dClosed ? formatTimeInTz(dClosed) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
-      o.type === "INSTALL" ? ((o.options && o.options.length ? o.options.join(", ") : o.option) || "—") : "—",
+      o.type === "INSTALL" ? optionsLabel(o) : "—",
+      o.type === "INSTALL" ? (o.totalDevices || 1) : 0,
       o.city || "—",
       o.masterName || "—",
       o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
@@ -1963,48 +2114,46 @@ function buildExcelReport(from, to, opts = {}) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Заявки");
 
-  // Сводка по видам монтажа (только заявки INSTALL, каждое устройство считается отдельно)
+  // Сводка по видам монтажа — с фактическим количеством устройств
   const installs = items.filter((o) => o.type === "INSTALL");
   const byOption = {};
   for (const o of installs) {
-    const opts = o.options && o.options.length ? o.options : (o.option ? [o.option] : ["—"]);
-    for (const opt of opts) {
-      byOption[opt] = (byOption[opt] || 0) + 1;
+    const opts2 = o.options && o.options.length ? o.options : (o.option ? [o.option] : ["—"]);
+    for (const opt of opts2) {
+      const qty = o.deviceQuantities?.[opt] || 1;
+      if (!byOption[opt]) byOption[opt] = { orders: 0, devices: 0 };
+      byOption[opt].orders += 1;
+      byOption[opt].devices += qty;
     }
   }
-  const optionRows = [["Вид монтажа", "Количество"]];
-  Object.entries(byOption).forEach(([opt, cnt]) => {
-    optionRows.push([opt, cnt]);
-  });
-  const wsOptions = XLSX.utils.aoa_to_sheet(optionRows);
-  XLSX.utils.book_append_sheet(wb, wsOptions, "Сводка по видам");
+  let optionRows = [["Вид монтажа", "Заявок", "Устройств"]];
+  Object.entries(byOption).forEach(([opt, s]) => optionRows.push([opt, s.orders, s.devices]));
+  optionRows = addTotalsRow(optionRows);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(optionRows), "Сводка по видам");
 
-  // Сводка по монтажникам (мастерам)
+  // Сводка по мастерам — с выездами и устройствами
   const byMaster = {};
   for (const o of items) {
     const name = o.masterName || "—";
-    if (!byMaster[name]) {
-      byMaster[name] = { total: 0, installs: 0, repairs: 0 };
-    }
+    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0, devices: 0 };
     byMaster[name].total += 1;
-    if (o.type === "INSTALL") byMaster[name].installs += 1;
+    if (o.type === "INSTALL") { byMaster[name].installs += 1; byMaster[name].devices += o.totalDevices || 1; }
     else if (o.type === "REPAIR") byMaster[name].repairs += 1;
+    if (o.logistics === "VISIT") byMaster[name].visits += 1;
   }
-  const masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое"]];
-  Object.entries(byMaster).forEach(([name, stats]) => {
-    masterRows.push([name, stats.total, stats.installs, stats.repairs]);
-  });
-  const wsMasters = XLSX.utils.aoa_to_sheet(masterRows);
-  XLSX.utils.book_append_sheet(wb, wsMasters, "Сводка по мастерам");
+  let masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", "Устройств"]];
+  Object.entries(byMaster).forEach(([name, s]) =>
+    masterRows.push([name, s.total, s.installs, s.repairs, s.visits, s.devices])
+  );
+  masterRows = addTotalsRow(masterRows);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRows), "Сводка по мастерам");
 
   const tmpDir = os.tmpdir();
-  // Имя файла вида: Установки_01.03.2026-31.03.2026.xlsx
   const fromStr = formatDate(from);
   const toStr = formatDate(to);
-  const filename =
-    fromStr === toStr
-      ? `Установки_${fromStr}.xlsx`
-      : `Установки_${fromStr}-${toStr}.xlsx`;
+  const filename = fromStr === toStr
+    ? `Установки_${fromStr}.xlsx`
+    : `Установки_${fromStr}-${toStr}.xlsx`;
   const filePath = path.join(tmpDir, filename);
   XLSX.writeFile(wb, filePath);
   return filePath;
@@ -2017,12 +2166,15 @@ function buildExcelReportPending(opts = {}) {
   const rows = [
     [
       "№",
-      "Дата начала",
-      "Время начала",
-      "Дата завершения",
-      "Время завершения",
+      "Дата создания",
+      "Время создания",
+      "Дата выполнения (мастер)",
+      "Время выполнения (мастер)",
+      "Дата закрытия (админ)",
+      "Время закрытия (админ)",
       "Тип",
-      "Вид монтажа",
+      "Устройства",
+      "Кол-во уст.",
       "Город",
       "Мастер",
       "Логистика",
@@ -2035,16 +2187,20 @@ function buildExcelReportPending(opts = {}) {
   ];
 
   items.forEach((o, i) => {
-    const dStart = o.createdAt ? new Date(o.createdAt) : null;
-    const dEnd = o.completedAt ? new Date(o.completedAt) : null;
+    const dStart  = o.createdAt   ? new Date(o.createdAt)   : null;
+    const dDone   = o.completedAt ? new Date(o.completedAt) : null;
+    const dClosed = o.closedAt    ? new Date(o.closedAt)    : null;
     rows.push([
       i + 1,
-      dStart ? formatDateInTz(dStart) : "",
-      dStart ? formatTimeInTz(dStart) : "",
-      dEnd ? formatDateInTz(dEnd) : "",
-      dEnd ? formatTimeInTz(dEnd) : "",
+      dStart  ? formatDateInTz(dStart)  : "",
+      dStart  ? formatTimeInTz(dStart)  : "",
+      dDone   ? formatDateInTz(dDone)   : "",
+      dDone   ? formatTimeInTz(dDone)   : "",
+      dClosed ? formatDateInTz(dClosed) : "",
+      dClosed ? formatTimeInTz(dClosed) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
-      o.type === "INSTALL" ? ((o.options && o.options.length ? o.options.join(", ") : o.option) || "—") : "—",
+      o.type === "INSTALL" ? optionsLabel(o) : "—",
+      o.type === "INSTALL" ? (o.totalDevices || 1) : 0,
       o.city || "—",
       o.masterName || "—",
       o.logistics === "VISIT" ? "Выезд" : o.logistics === "COME" ? "Клиент приедет" : "—",
@@ -2063,25 +2219,33 @@ function buildExcelReportPending(opts = {}) {
   const installs = items.filter((o) => o.type === "INSTALL");
   const byOption = {};
   for (const o of installs) {
-    const opts = o.options && o.options.length ? o.options : (o.option ? [o.option] : ["—"]);
-    for (const opt of opts) {
-      byOption[opt] = (byOption[opt] || 0) + 1;
+    const opts2 = o.options?.length ? o.options : (o.option ? [o.option] : ["—"]);
+    for (const opt of opts2) {
+      const qty = o.deviceQuantities?.[opt] || 1;
+      if (!byOption[opt]) byOption[opt] = { orders: 0, devices: 0 };
+      byOption[opt].orders += 1;
+      byOption[opt].devices += qty;
     }
   }
-  const optionRows = [["Вид монтажа", "Количество"]];
-  Object.entries(byOption).forEach(([opt, cnt]) => optionRows.push([opt, cnt]));
+  let optionRows = [["Вид монтажа", "Заявок", "Устройств"]];
+  Object.entries(byOption).forEach(([opt, s]) => optionRows.push([opt, s.orders, s.devices]));
+  optionRows = addTotalsRow(optionRows);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(optionRows), "Сводка по видам");
 
   const byMaster = {};
   for (const o of items) {
     const name = o.masterName || "—";
-    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0 };
+    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0, devices: 0 };
     byMaster[name].total += 1;
-    if (o.type === "INSTALL") byMaster[name].installs += 1;
+    if (o.type === "INSTALL") { byMaster[name].installs += 1; byMaster[name].devices += o.totalDevices || 1; }
     else if (o.type === "REPAIR") byMaster[name].repairs += 1;
+    if (o.logistics === "VISIT") byMaster[name].visits += 1;
   }
-  const masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое"]];
-  Object.entries(byMaster).forEach(([name, stats]) => masterRows.push([name, stats.total, stats.installs, stats.repairs]));
+  let masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", "Устройств"]];
+  Object.entries(byMaster).forEach(([name, s]) =>
+    masterRows.push([name, s.total, s.installs, s.repairs, s.visits, s.devices])
+  );
+  masterRows = addTotalsRow(masterRows);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRows), "Сводка по мастерам");
 
   const tmpDir = os.tmpdir();
@@ -2093,7 +2257,11 @@ function buildExcelReportPending(opts = {}) {
 function optionsLabel(order) {
   if (order.type !== "INSTALL") return "";
   const opts = order.options && order.options.length ? order.options : (order.option ? [order.option] : []);
-  return opts.length ? opts.join(", ") : "-";
+  if (!opts.length) return "-";
+  if (order.deviceQuantities && Object.keys(order.deviceQuantities).length) {
+    return opts.map(o => `${o} ×${order.deviceQuantities[o] || 1}`).join(", ");
+  }
+  return opts.join(", ");
 }
 
 function formatOrderForMaster(order) {
