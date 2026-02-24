@@ -31,7 +31,7 @@ const OPTIONS = [
 
 // =============================
 // In-memory storage (для теста)
-// Потом заменим на Google Sheets.
+// Потом заменим на GitHub (или другое хранилище).
 // =============================
 let lastOrderId = 0;
 const orders = new Map();    // orderId -> order
@@ -225,7 +225,7 @@ async function onMessage(message) {
     st.data.phone = text;
     setState(chatId, "ADMIN_WAIT_MASTER", st.data);
     await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", {
-      reply_markup: { remove_keyboard: true }, // чтобы не мешало во время выбора inline
+      reply_markup: mainMenuReplyKeyboard(),
     });
     await sendMessage(chatId, "Список мастеров:", { reply_markup: mastersKeyboard() });
     return;
@@ -298,8 +298,17 @@ async function onCallback(cb) {
 
   await answerCb(cb.id);
 
-  // Cancel
+  // Cancel — на шаге комментария не сбрасываем заявку: пользователь может ещё ввести текст
   if (data === "CANCEL") {
+    const st = getState(chatId);
+    if (st && st.step === "ADMIN_WAIT_COMMENT") {
+      await editMessage(
+        chatId,
+        messageId,
+        "✍️ Напишите комментарий в чат.\nДля отмены заявки нажмите «❌ Отмена» в меню ниже."
+      );
+      return;
+    }
     clearState(chatId);
     await editMessage(chatId, messageId, "❌ Отменено.");
     await sendMessage(chatId, "Выберите действие:", { reply_markup: mainMenuReplyKeyboard() });
@@ -540,4 +549,17 @@ async function sendOrderToMaster(order) {
 // Start server
 // =============================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`✅ Server started on port ${PORT}`);
+  // Меню команд: при открытии чата в (/) будет видна команда «Показать меню»
+  try {
+    await tg("setMyCommands", {
+      commands: [
+        { command: "start", description: "Показать меню" },
+        { command: "getmyid", description: "Мой Telegram ID" },
+      ],
+    });
+  } catch (e) {
+    console.warn("setMyCommands:", e?.message || e);
+  }
+});
