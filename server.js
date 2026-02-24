@@ -125,13 +125,16 @@ function logisticsKeyboard() {
   };
 }
 
+// ✅ FIX: передаём индекс опции, а не текст (чтобы работали FMB140+Temp. и т.п.)
 function optionsKeyboard(orderId) {
   const rows = [];
   for (let i = 0; i < OPTIONS.length; i += 2) {
-    const a = OPTIONS[i];
-    const b = OPTIONS[i + 1];
-    const row = [{ text: a, callback_data: `ADMIN_OPT:${orderId}:${a}` }];
-    if (b) row.push({ text: b, callback_data: `ADMIN_OPT:${orderId}:${b}` });
+    const row = [
+      { text: OPTIONS[i], callback_data: `ADMIN_OPT:${orderId}:${i}` },
+    ];
+    if (OPTIONS[i + 1]) {
+      row.push({ text: OPTIONS[i + 1], callback_data: `ADMIN_OPT:${orderId}:${i + 1}` });
+    }
     rows.push(row);
   }
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
@@ -439,7 +442,7 @@ async function onCallback(cb) {
     return;
   }
 
-  // ADMIN: picked option
+  // ✅ FIX: ADMIN: picked option (берём индекс, а не текст)
   if (data.startsWith("ADMIN_OPT:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_OPTION") {
@@ -449,12 +452,18 @@ async function onCallback(cb) {
 
     const parts = data.split(":");
     const orderId = parts[1];
-    const option = parts.slice(2).join(":");
+    const optIndex = Number(parts[2]);
 
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
       await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: mainMenuReplyKeyboard() });
+      return;
+    }
+
+    const option = OPTIONS[optIndex];
+    if (!option) {
+      await sendMessage(chatId, "⚠️ Опция не найдена. Проверь массив OPTIONS.", { reply_markup: mainMenuReplyKeyboard() });
       return;
     }
 
@@ -524,7 +533,6 @@ function formatAdminConfirm(order) {
 
 async function sendOrderToMaster(order) {
   const text = formatOrderForMaster(order);
-  // мастеру можно отправлять без меню админа — но оставим ReplyKeyboard чтобы было удобно
   await sendMessage(order.masterTgId, text, { reply_markup: mainMenuReplyKeyboard() });
 }
 
