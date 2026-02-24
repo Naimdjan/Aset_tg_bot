@@ -555,6 +555,16 @@ function optionsKeyboard(orderId, selected = []) {
   return { inline_keyboard: rows };
 }
 
+// Клавиатура для шага ввода комментария: Отправить + Отмена
+function adminCommentKeyboard(orderId) {
+  return {
+    inline_keyboard: [[
+      { text: "✅ Отправить", callback_data: `ADMIN_SUBMIT_COMMENT:${orderId}` },
+      { text: "❌ Отмена",   callback_data: "CANCEL" },
+    ]],
+  };
+}
+
 // Клавиатура выбора количества устройства (1-10)
 function qtyKeyboard(orderId) {
   return {
@@ -782,7 +792,7 @@ async function onMessage(message) {
       await sendMessage(
         chatId,
         `🧰 Ремонт / другое\n🚗 Выезд к клиенту\n📍 Адрес: ${order.address}\n\n✍️ Напишите комментарий (что сломано / что нужно сделать):`,
-        { reply_markup: adminMenuReplyKeyboard() }
+        { reply_markup: adminCommentKeyboard(orderId) }
       );
       return;
     }
@@ -875,7 +885,15 @@ async function onMessage(message) {
     // Все фото/пропуски собраны — показываем кнопку «Выполнено»
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
     const warnMsg = getMissingPhotoWarning(order);
-    if (warnMsg) await sendMessage(chatId, warnMsg);
+    if (warnMsg) {
+      await sendMessage(chatId, warnMsg);
+      // Немедленно информируем администратора
+      const adminChatIdW = order.adminChatId || MAIN_ADMIN_ID;
+      safeSend(adminChatIdW, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
+      if (String(adminChatIdW) !== String(SUPER_ADMIN_ID)) {
+        safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
+      }
+    }
     await sendMessage(chatId, `✅ Все данные по заявке #${order.id} сохранены.`);
     await sendMessage(
       chatId,
@@ -1333,10 +1351,14 @@ async function onCallback(cb) {
     const arrivalPrompt = isVisit
       ? "Когда прибудете к клиенту, нажмите кнопку ниже:"
       : "Когда клиент приедет, нажмите кнопку ниже:";
+    const commentPart = order.adminComment
+      ? `\n\n<b>💬 Комментарий: ${order.adminComment}</b>`
+      : "";
     await sendMessage(
       order.masterTgId,
-      `✅ Администратор подтвердил время для заявки #${order.id}:\n⏰ ${order.confirmedTimeText}\n\n${arrivalPrompt}`,
+      `✅ Администратор подтвердил время для заявки #${order.id}:\n⏰ ${order.confirmedTimeText}${commentPart}\n\n${arrivalPrompt}`,
       {
+        parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
             [{ text: arrivalBtnText, callback_data: `MASTER_CLIENT_ARRIVED:${order.id}` }],
@@ -1429,7 +1451,14 @@ async function onCallback(cb) {
     setState(chatId, "MASTER_WAIT_DONE", { orderId });
     await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены.`);
     const warnSkip = getMissingPhotoWarning(order);
-    if (warnSkip) await sendMessage(chatId, warnSkip);
+    if (warnSkip) {
+      await sendMessage(chatId, warnSkip);
+      const adminChatIdWS = order.adminChatId || MAIN_ADMIN_ID;
+      safeSend(adminChatIdWS, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnSkip}`);
+      if (String(adminChatIdWS) !== String(SUPER_ADMIN_ID)) {
+        safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnSkip}`);
+      }
+    }
     await sendMessage(
       chatId,
       `<b>ПО ЗАВЕРШЕНИЮ РАБОТ ПОДТВЕРДИТЕ, нажав «✅ Выполнено».</b>`,
@@ -1458,11 +1487,10 @@ async function onCallback(cb) {
     const doneMsg =
       `✅ Заявка #${order.id} выполнена.\n` +
       `👷 Мастер: ${order.masterName}\n` +
-      `🚗/🏢: ${logisticsLabel(order)}\n\n` +
-      `Нажмите кнопку ниже, чтобы официально закрыть заявку.`;
-    await sendMessage(adminChatId, doneMsg, { reply_markup: doneCloseKb });
-    // Все фото уже были отправлены в реальном времени.
-    // Отправляем только сводку по пропущенным/не сданным слотам.
+      `🚗/🏢: ${logisticsLabel(order)}`;
+    // 1. Уведомление о завершении (без кнопки закрытия)
+    await sendMessage(adminChatId, doneMsg);
+    // 2. Сводка по пропущенным фото (уже отправлены в реальном времени)
     const devPhotos = order.devicePhotos || {};
     const doneSlots = getPhotoSlots(order);
     for (const slot of doneSlots) {
@@ -1473,9 +1501,11 @@ async function onCallback(cb) {
         await sendMessage(adminChatId, `⚠️ ${slot.label}: обязательное фото не предоставлено`);
       }
     }
-    // Кнопка закрытия — и обычному админу и супер-админу
+    // 3. Кнопка закрытия — В САМОМ КОНЦЕ
+    await sendMessage(adminChatId, "Нажмите для официального закрытия заявки:", { reply_markup: doneCloseKb });
     if (String(adminChatId) !== String(SUPER_ADMIN_ID)) {
-      await safeSend(SUPER_ADMIN_ID, doneMsg, { reply_markup: doneCloseKb });
+      await safeSend(SUPER_ADMIN_ID, doneMsg);
+      await safeSend(SUPER_ADMIN_ID, "Нажмите для официального закрытия заявки:", { reply_markup: doneCloseKb });
     }
     return;
   }
@@ -1696,7 +1726,7 @@ async function onCallback(cb) {
         chatId,
         messageId,
         `🧰 Ремонт / другое\n🏢 Клиент сам приедет\n\n✍️ Напишите комментарий (что сломано / что нужно сделать):`,
-        { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
+        { reply_markup: adminCommentKeyboard(orderId) }
       );
       return;
     }
@@ -1822,15 +1852,45 @@ async function onCallback(cb) {
     order.totalDevices = Object.values(quantities).reduce((a, b) => a + b, 0);
 
     const qtyText = order.options.map(o => `${o} × ${quantities[o]}`).join(", ");
+
+    // Итого: устройства и аксессуары отдельно
+    const devTotal = order.options
+      .filter(o => OPTIONS_DEVICES.includes(o))
+      .reduce((s, o) => s + (quantities[o] || 0), 0);
+    const accTotal = order.options
+      .filter(o => OPTIONS_ACCESSORIES.includes(o))
+      .reduce((s, o) => s + (quantities[o] || 0), 0);
+    const summaryParts = [];
+    if (devTotal) summaryParts.push(`${devTotal} устр.`);
+    if (accTotal) summaryParts.push(`${accTotal} акс.`);
+    const summaryLine = summaryParts.length ? `📊 Итого: ${summaryParts.join(", ")}\n\n` : "";
+
     setState(chatId, "ADMIN_WAIT_COMMENT", { orderId });
 
     const hint =
       "✍️ Напишите комментарий.\n" +
       "Например: «поставить реле, SIM клиента, серийники позже»";
 
-    await editMessage(chatId, messageId, `✅ Устройства: ${qtyText}\n\n${hint}`, {
-      reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
+    await editMessage(chatId, messageId, `✅ Устройства: ${qtyText}\n\n${summaryLine}${hint}`, {
+      reply_markup: adminCommentKeyboard(orderId),
     });
+    return;
+  }
+
+  // ADMIN: нажал «✅ Отправить» в шаге комментария (пустой или уже введённый комментарий)
+  if (data.startsWith("ADMIN_SUBMIT_COMMENT:")) {
+    const orderId = data.split(":")[1];
+    const order = orders.get(orderId);
+    if (!order) {
+      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+    if (!order.adminComment) order.adminComment = "";
+    order.status = "SENT_TO_MASTER";
+    clearState(chatId);
+    await sendOrderToMaster(order);
+    await editMessage(chatId, messageId, formatAdminConfirm(order));
+    await sendMessage(chatId, "✅ Заявка отправлена мастеру.", { reply_markup: adminMenuReplyKeyboard() });
     return;
   }
 }
@@ -2192,19 +2252,26 @@ function buildExcelReport(from, to, opts = {}) {
   optionRows = addTotalsRow(optionRows);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(optionRows), "Сводка по видам");
 
-  // Сводка по мастерам — с выездами и устройствами
+  // Сводка по мастерам — с выездами, устройствами и аксессуарами отдельно
   const byMaster = {};
   for (const o of items) {
     const name = o.masterName || "—";
-    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0, devices: 0 };
+    if (!byMaster[name]) byMaster[name] = { total: 0, installs: 0, repairs: 0, visits: 0, devices: 0, accessories: 0 };
     byMaster[name].total += 1;
-    if (o.type === "INSTALL") { byMaster[name].installs += 1; byMaster[name].devices += o.totalDevices || 1; }
-    else if (o.type === "REPAIR") byMaster[name].repairs += 1;
+    if (o.type === "INSTALL") {
+      byMaster[name].installs += 1;
+      const oOpts = o.options?.length ? o.options : (o.option ? [o.option] : []);
+      for (const opt of oOpts) {
+        const qty = o.deviceQuantities?.[opt] || 1;
+        if (OPTIONS_DEVICES.includes(opt))     byMaster[name].devices     += qty;
+        else if (OPTIONS_ACCESSORIES.includes(opt)) byMaster[name].accessories += qty;
+      }
+    } else if (o.type === "REPAIR") byMaster[name].repairs += 1;
     if (o.logistics === "VISIT") byMaster[name].visits += 1;
   }
-  let masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", "Устройств"]];
+  let masterRows = [["Мастер", "Всего заявок", "Монтаж", "Ремонт/другое", "Выездов", "Устройств", "Аксессуаров"]];
   Object.entries(byMaster).forEach(([name, s]) =>
-    masterRows.push([name, s.total, s.installs, s.repairs, s.visits, s.devices])
+    masterRows.push([name, s.total, s.installs, s.repairs, s.visits, s.devices, s.accessories])
   );
   masterRows = addTotalsRow(masterRows);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(masterRows), "Сводка по мастерам");
