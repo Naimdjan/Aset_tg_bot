@@ -113,8 +113,7 @@ function getPhotoSlots(order) {
 }
 
 // =============================
-// In-memory storage (для теста)
-// Потом заменим на GitHub (или другое хранилище).
+// In-memory storage
 // =============================
 let lastOrderId = 0;
 const orders = new Map();    // orderId -> order
@@ -1040,7 +1039,6 @@ async function onMessage(message) {
     return;
   }
 
-   // ADMIN: ждём ввод произвольного периода отчёта
   // если шаг неизвестен — сброс
   clearState(chatId);
   await sendMessage(chatId, "⚠️ Сессия сброшена. Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
@@ -1277,9 +1275,6 @@ async function onCallback(cb) {
 
     return;
   }
-
-  // Пустые (служебные) кнопки календаря
-  if (data === "NOOP") return;
 
   // MASTER: навигация по календарю
   if (data.startsWith("MN:")) {
@@ -1647,9 +1642,6 @@ async function onCallback(cb) {
     const [, orderId, photoType] = data.split(":");
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
-
-    const slot = getPhotoSlots(order).find(s => s.key === photoType);
-    const label = slot ? slot.label : photoType;
 
     setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
     // Тихо обновляем клавиатуру
@@ -2164,8 +2156,9 @@ const STATUS_LABELS = {
   SENT_TO_MASTER:        "Отправлена мастеру",
   ACCEPTED_BY_MASTER:    "Принята мастером",
   DECLINED_BY_MASTER:    "Отклонена мастером",
-  WAIT_ADMIN_CONFIRM_TIME: "Ожидает подтверждения времени",
-  TIME_CONFIRMED:        "Время подтверждено",
+  WAIT_ADMIN_CONFIRM_TIME:  "Ожидает подтв. времени (admin)",
+  WAIT_MASTER_CONFIRM_TIME: "Ожидает подтв. времени (мастер)",
+  TIME_CONFIRMED:           "Время подтверждено",
   CLIENT_ARRIVED:        "Клиент прибыл",
   DONE:                  "Выполнена",
   CLOSED:                "Закрыта",
@@ -2266,8 +2259,6 @@ function calcPresetPeriod(code) {
   return { from, to };
 }
 
-// Парсинг произвольного периода "dd.mm.yyyy-dd.mm.yyyy"
-
 // Общая фильтрация заявок за период для отчёта
 function getReportItems(from, to, opts = {}) {
   const scope = opts.scope || "ADMIN";
@@ -2284,13 +2275,13 @@ function getReportItems(from, to, opts = {}) {
   });
 }
 
-// Ожидающие заявки (статус не DONE)
+// Ожидающие заявки (не завершённые и не закрытые)
 function getPendingReportItems(opts = {}) {
   const scope = opts.scope || "ADMIN";
   const masterTgId = opts.masterTgId || null;
   const all = Array.from(orders.values());
   return all.filter((o) => {
-    if (o.status === "DONE") return false;
+    if (o.status === "DONE" || o.status === "CLOSED" || o.status === "DECLINED_BY_MASTER") return false;
     if (scope === "MASTER" && masterTgId != null) {
       return String(o.masterTgId) === String(masterTgId);
     }
