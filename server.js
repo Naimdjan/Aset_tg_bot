@@ -43,6 +43,7 @@ const MAIN_ADMIN_ID = SUPER_ADMIN_ID; // для совместимости со 
 const MASTERS = [
   { tgId: 7692783802, name: "Иброхимчон", city: "Худжанд" },
   { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" },
+  { tgId: 8026685490, name: "тест", city: "Душанбе" },
 ];
 
 // Опции сгруппированы: Устройства / Аксессуары / Другое
@@ -212,9 +213,9 @@ async function sendDocument(chatId, filePath, caption) {
 function adminMenuReplyKeyboard() {
   return {
     keyboard: [
-      [{ text: "📝 Новая заявка (монтаж)" }, { text: "🧰 Ремонт / другое" }],
-      [{ text: "❌ Отмена" }, { text: "📊 Отчёт" }],
-      [{ text: "💬 Продолжить чат" }],
+      [{ text: "📋 Новая заявка" }, { text: "🔧 Ремонт / другое" }],
+      [{ text: "📊 Отчёт" }, { text: "💬 Чат с мастером" }],
+      [{ text: "❌ Отмена" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -225,8 +226,8 @@ function adminMenuReplyKeyboard() {
 function masterMenuReplyKeyboard() {
   return {
     keyboard: [
-      [{ text: "📊 Отчёт" }, { text: "❌ Отмена" }],
-      [{ text: "💬 Продолжить чат" }],
+      [{ text: "📊 Мой отчёт" }, { text: "💬 Написать админу" }],
+      [{ text: "❌ Отмена" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -245,7 +246,7 @@ function menuKeyboardForChat(chatId) {
 // Inline keyboards (для выбора)
 function mastersKeyboard() {
   const rows = MASTERS.map((m) => [
-    { text: `📍 ${m.city} | 👷 ${m.name}`, callback_data: `ADMIN_PICK_MASTER:${m.tgId}` },
+    { text: `🏙 ${m.city}  ·  👷 ${m.name}`, callback_data: `ADMIN_PICK_MASTER:${m.tgId}` },
   ]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
@@ -253,7 +254,7 @@ function mastersKeyboard() {
 
 function mastersChatKeyboard() {
   const rows = MASTERS.map((m) => [
-    { text: `👷 ${m.name} (${m.city})`, callback_data: `ADMIN_CHAT_MASTER:${m.tgId}` },
+    { text: `💬 ${m.name}  ·  🏙 ${m.city}`, callback_data: `ADMIN_CHAT_MASTER:${m.tgId}` },
   ]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
@@ -262,8 +263,10 @@ function mastersChatKeyboard() {
 function orderTypeKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "🛠 Монтаж", callback_data: "ADMIN_TYPE:INSTALL" }],
-      [{ text: "🧰 Ремонт / другое", callback_data: "ADMIN_TYPE:REPAIR" }],
+      [
+        { text: "🛠 Монтаж", callback_data: "ADMIN_TYPE:INSTALL" },
+        { text: "🔧 Ремонт / другое", callback_data: "ADMIN_TYPE:REPAIR" },
+      ],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
   };
@@ -272,8 +275,10 @@ function orderTypeKeyboard() {
 function logisticsKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "🚗 Выезд к клиенту", callback_data: "ADMIN_LOG:VISIT" }],
-      [{ text: "🏢 Клиент сам приедет", callback_data: "ADMIN_LOG:COME" }],
+      [
+        { text: "🚗 Выезд", callback_data: "ADMIN_LOG:VISIT" },
+        { text: "🏢 Сам приедет", callback_data: "ADMIN_LOG:COME" },
+      ],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
   };
@@ -284,19 +289,19 @@ function reportPeriodKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: "📅 Сегодня", callback_data: "REPORT_PERIOD:TODAY" },
-        { text: "📅 Вчера", callback_data: "REPORT_PERIOD:YESTERDAY" },
+        { text: "📆 Сегодня", callback_data: "REPORT_PERIOD:TODAY" },
+        { text: "📆 Вчера", callback_data: "REPORT_PERIOD:YESTERDAY" },
       ],
       [
-        { text: "📅 Текущий месяц", callback_data: "REPORT_PERIOD:THIS_MONTH" },
-        { text: "📅 Прошлый месяц", callback_data: "REPORT_PERIOD:LAST_MONTH" },
+        { text: "🗓 Этот месяц", callback_data: "REPORT_PERIOD:THIS_MONTH" },
+        { text: "🗓 Прошлый месяц", callback_data: "REPORT_PERIOD:LAST_MONTH" },
       ],
       [
-        { text: "📅 Последние 7 дней", callback_data: "REPORT_PERIOD:LAST_7" },
-        { text: "📅 Свой период", callback_data: "REPORT_PERIOD:CUSTOM" },
+        { text: "📅 7 дней", callback_data: "REPORT_PERIOD:LAST_7" },
+        { text: "✏️ Свой период", callback_data: "REPORT_PERIOD:CUSTOM" },
       ],
-      [{ text: "📅 Календарь", callback_data: "REPORT_PERIOD:PERIOD" }],
-      [{ text: "📋 Ожидающие заявки", callback_data: "REPORT_PERIOD:PENDING" }],
+      [{ text: "🗓 Выбрать по календарю", callback_data: "REPORT_PERIOD:PERIOD" }],
+      [{ text: "⏳ Ожидающие заявки", callback_data: "REPORT_PERIOD:PENDING" }],
       [{ text: "❌ Отмена", callback_data: "CANCEL" }],
     ],
   };
@@ -356,8 +361,8 @@ function masterOrderKeyboard(orderId) {
   return {
     inline_keyboard: [
       [
-        { text: "✅ Беру сегодня", callback_data: `MASTER_ACCEPT:${orderId}:TODAY` },
-        { text: "✅ Беру завтра", callback_data: `MASTER_ACCEPT:${orderId}:TOMORROW` },
+        { text: "✅ Сегодня", callback_data: `MASTER_ACCEPT:${orderId}:TODAY` },
+        { text: "✅ Завтра", callback_data: `MASTER_ACCEPT:${orderId}:TOMORROW` },
       ],
     ],
   };
@@ -655,7 +660,7 @@ async function onMessage(message) {
     return;
   }
 
-  if (text === "📊 Отчёт") {
+  if (text === "📊 Отчёт" || text === "📊 Мой отчёт") {
     const isMaster = isMasterChat(chatId);
     const scope = isMaster ? "MASTER" : "ADMIN";
     const masterTgId = isMaster ? chatId : null;
@@ -667,7 +672,7 @@ async function onMessage(message) {
     return;
   }
 
-  if (text === "💬 Продолжить чат") {
+  if (text === "💬 Написать админу" || text === "💬 Продолжить чат") {
     if (isMasterChat(chatId)) {
       // мастер: чат с админом
       setState(chatId, "MASTER_CHAT_WITH_ADMIN", {});
@@ -685,20 +690,20 @@ async function onMessage(message) {
       }
       // админ: сначала выбрать мастера
       setState(chatId, "ADMIN_CHAT_PICK_MASTER", {});
-      await sendMessage(chatId, "💬 Выберите мастера для чата:", {
+      await sendMessage(chatId, "💬 Выберите мастера:", {
         reply_markup: mastersChatKeyboard(),
       });
       return;
     }
   }
 
-  if (text === "📝 Новая заявка (монтаж)") {
+  if (text === "📋 Новая заявка" || text === "📝 Новая заявка (монтаж)") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "INSTALL" });
     await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
     return;
   }
 
-  if (text === "🧰 Ремонт / другое") {
+  if (text === "🔧 Ремонт / другое" || text === "🧰 Ремонт / другое") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "REPAIR" });
     await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
     return;
@@ -1490,14 +1495,12 @@ async function onCallback(cb) {
       `🚗/🏢: ${logisticsLabel(order)}`;
     // 1. Уведомление о завершении (без кнопки закрытия)
     await sendMessage(adminChatId, doneMsg);
-    // 2. Сводка по пропущенным фото (уже отправлены в реальном времени)
+    // 2. Только обязательные фото, которые не были предоставлены
     const devPhotos = order.devicePhotos || {};
     const doneSlots = getPhotoSlots(order);
     for (const slot of doneSlots) {
       const fid = devPhotos[slot.key];
-      if (fid === "SKIPPED") {
-        await sendMessage(adminChatId, `⏭ ${slot.label}: пропущено`);
-      } else if (!fid && slot.required) {
+      if (!fid && slot.required) {
         await sendMessage(adminChatId, `⚠️ ${slot.label}: обязательное фото не предоставлено`);
       }
     }
