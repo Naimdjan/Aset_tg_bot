@@ -12,12 +12,12 @@ if (!BOT_TOKEN) console.error("❌ BOT_TOKEN not found in environment variables"
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // =============================
-// CONFIG: Masters (пока вручную)
+// CONFIG: Masters
 // =============================
 const MASTERS = [
-  { tgId: 7862998301, name: "Абдулахим", city: "Худжанд" },
-  { tgId: 7692783802, name: "Иброхимчон", city: "Душанбе" },
-  { tgId: 7862998301, name: "Акаи Шухрат", city: "Бохтар" },
+  { tgId: 7862998301, name: "Абдухалим", city: "Душанбе" },
+  { tgId: 7692783802, name: "Иброхимчон", city: "Худжанд" },
+  { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" }, 
 ];
 
 // Опции (выбирает АДМИН)
@@ -32,8 +32,8 @@ const OPTIONS = [
 ];
 
 // =============================
-// In-memory storage (для теста)
-// Потом заменим на Google Sheets.
+// In-memory storage 
+// (На платном Render данные будут храниться до следующего деплоя)
 // =============================
 let lastOrderId = 0;
 const orders = new Map(); // orderId -> order
@@ -175,6 +175,18 @@ async function onMessage(message) {
   // ADMIN: ждём телефон
   if (st.step === "ADMIN_WAIT_PHONE") {
     st.data.phone = text;
+    setState(chatId, "ADMIN_WAIT_ADDRESS", st.data);
+    await sendMessage(
+      chatId, 
+      "📍 Введите точный адрес клиента (улица, дом, ориентир):", 
+      { reply_markup: { inline_keyboard: [[{ text: "❌ Отмена", callback_data: "CANCEL" }]] } }
+    );
+    return;
+  }
+
+  // ADMIN: ждём адрес
+  if (st.step === "ADMIN_WAIT_ADDRESS") {
+    st.data.address = text;
     setState(chatId, "ADMIN_WAIT_MASTER", st.data);
     await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", { reply_markup: mastersKeyboard() });
     return;
@@ -260,6 +272,7 @@ async function onCallback(cb) {
       id: orderId,
       createdAt: new Date().toISOString(),
       phone: st.data.phone,
+      address: st.data.address,
 
       masterTgId: master.tgId,
       masterName: master.name,
@@ -379,6 +392,7 @@ function formatOrderForMaster(order) {
     `${typeLabel} #${order.id}\n` +
     `📞 Телефон: ${order.phone}\n` +
     `📍 Город: ${order.city}\n` +
+    `🏠 Адрес: ${order.address}\n` +
     `👷 Мастер: ${order.masterName}\n` +
     (optLine ? `${optLine}\n` : "") +
     `\n${commentLine}`
@@ -392,6 +406,7 @@ function formatAdminConfirm(order) {
     `✅ Заявка #${order.id} отправлена мастеру.\n` +
     `📞 Телефон: ${order.phone}\n` +
     `📍 Город: ${order.city}\n` +
+    `🏠 Адрес: ${order.address}\n` +
     `👷 Мастер: ${order.masterName}\n` +
     `🧾 Тип: ${typeLabel}\n` +
     (optLine ? `${optLine}\n` : "") +
