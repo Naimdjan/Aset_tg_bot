@@ -992,8 +992,7 @@ async function onMessage(message) {
       `📷 ${photoLabel}\n` +
       `📋 Заявка #${order.id}\n` +
       `📅 Дата: ${photoDate}\n` +
-      `📞 Клиент: ${order.phone || "—"}\n` +
-      `👷 Мастер: ${order.masterName || "—"}`;
+      `📞 Клиент: ${order.phone || "—"}`;
     await sendPhoto(adminChatIdImm, fileId, photoCaption).catch(() => {});
     if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) {
       sendPhoto(SUPER_ADMIN_ID, fileId, photoCaption).catch(() => {});
