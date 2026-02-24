@@ -1652,14 +1652,8 @@ async function onCallback(cb) {
     const label = slot ? slot.label : photoType;
 
     setState(chatId, "MASTER_WAIT_PHOTO", { orderId, photoType });
-    // Обновляем клавиатуру без смены текста (тихо)
+    // Тихо обновляем клавиатуру
     await tg("editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: masterArrivalPhotoKeyboard(orderId, order) }).catch(() => {});
-    // Отправляем force_reply — фокусирует поле ввода для ответа
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `📎 ${label}`,
-      reply_markup: { force_reply: true, input_field_placeholder: "Отправьте фото..." },
-    });
     return;
   }
 
