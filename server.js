@@ -133,6 +133,7 @@ function adminMenuReplyKeyboard() {
     keyboard: [
       [{ text: "📝 Новая заявка (монтаж)" }, { text: "🧰 Ремонт / другое" }],
       [{ text: "❌ Отмена" }, { text: "📊 Отчёт" }],
+      [{ text: "💬 Продолжить чат" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -144,6 +145,7 @@ function masterMenuReplyKeyboard() {
   return {
     keyboard: [
       [{ text: "📊 Отчёт" }, { text: "❌ Отмена" }],
+      [{ text: "💬 Продолжить чат" }],
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -163,6 +165,14 @@ function menuKeyboardForChat(chatId) {
 function mastersKeyboard() {
   const rows = MASTERS.map((m) => [
     { text: `📍 ${m.city} | 👷 ${m.name}`, callback_data: `ADMIN_PICK_MASTER:${m.tgId}` },
+  ]);
+  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+  return { inline_keyboard: rows };
+}
+
+function mastersChatKeyboard() {
+  const rows = MASTERS.map((m) => [
+    { text: `👷 ${m.name} (${m.city})`, callback_data: `ADMIN_CHAT_MASTER:${m.tgId}` },
   ]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
@@ -275,7 +285,7 @@ function masterArrivalPhotoKeyboard(orderId, order) {
   const rows = [];
   const hasNumber = order.carNumberPhotoId || order.carNumberSkipped;
   const hasOdometer = order.odometerPhotoId || order.odometerSkipped;
-  const hasDevice = !!order.devicePhotoId;
+  const hasDevice = order.devicePhotoId || order.deviceSkipped;
 
   if (!hasNumber) {
     rows.push([
@@ -290,7 +300,10 @@ function masterArrivalPhotoKeyboard(orderId, order) {
     ]);
   }
   if (!hasDevice) {
-    rows.push([{ text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` }]);
+    rows.push([
+      { text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` },
+      { text: "⏭ Без устройства", callback_data: `MASTER_SKIP:${orderId}:DEVICE` },
+    ]);
   }
   if (rows.length === 0) return null;
   return { inline_keyboard: rows };
@@ -501,6 +514,24 @@ async function onMessage(message) {
     return;
   }
 
+  if (text === "💬 Продолжить чат") {
+    if (isMasterChat(chatId)) {
+      // мастер: чат с админом
+      setState(chatId, "MASTER_CHAT_WITH_ADMIN", {});
+      await sendMessage(chatId, "💬 Чат с админом. Напишите сообщение. Для выхода нажмите «❌ Отмена».", {
+        reply_markup: masterMenuReplyKeyboard(),
+      });
+      return;
+    } else {
+      // админ: сначала выбрать мастера
+      setState(chatId, "ADMIN_CHAT_PICK_MASTER", {});
+      await sendMessage(chatId, "💬 Выберите мастера для чата:", {
+        reply_markup: mastersChatKeyboard(),
+      });
+      return;
+    }
+  }
+
   if (text === "📝 Новая заявка (монтаж)") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "INSTALL" });
     await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
@@ -518,6 +549,32 @@ async function onMessage(message) {
   if (!st) {
     // Если человек написал что-то без процесса — просто покажем меню
     await sendMessage(chatId, "Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
+    return;
+  }
+
+  // ADMIN: чат с выбранным мастером
+  if (st.step === "ADMIN_CHAT_WITH_MASTER") {
+    const masterTgId = st.data.masterTgId;
+    const master = MASTERS.find((m) => String(m.tgId) === String(masterTgId));
+    const masterName = master ? master.name : "мастер";
+    if (text) {
+      await sendMessage(masterTgId, `💬 Сообщение от админа:\n${text}`);
+      await sendMessage(chatId, `✅ Отправлено ${masterName}.`, { reply_markup: adminMenuReplyKeyboard() });
+    }
+    return;
+  }
+
+  // MASTER: чат с админом
+  if (st.step === "MASTER_CHAT_WITH_ADMIN") {
+    const master = MASTERS.find((m) => String(m.tgId) === String(chatId));
+    const masterName = master ? master.name : "Мастер";
+    if (text) {
+      await sendMessage(
+        MAIN_ADMIN_ID,
+        `💬 Сообщение от мастера ${masterName} (ID: ${chatId}):\n${text}`
+      );
+      await sendMessage(chatId, "✅ Отправлено админу.", { reply_markup: masterMenuReplyKeyboard() });
+    }
     return;
   }
 
@@ -1096,12 +1153,20 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
-    if (skipType === "PLATE") order.carNumberSkipped = true;
-    else if (skipType === "ODOMETER") order.odometerSkipped = true;
+    let skipLabel = "";
+    if (skipType === "PLATE") {
+      order.carNumberSkipped = true;
+      skipLabel = "номера";
+    } else if (skipType === "ODOMETER") {
+      order.odometerSkipped = true;
+      skipLabel = "пробега";
+    } else if (skipType === "DEVICE") {
+      order.deviceSkipped = true;
+      skipLabel = "устройства";
+    }
 
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     if (kb) {
-      const skipLabel = skipType === "PLATE" ? "номера" : "пробега";
       await editMessage(
         chatId,
         messageId,
@@ -1150,6 +1215,8 @@ async function onCallback(cb) {
     }
     if (order.devicePhotoId) {
       await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
+    } else if (order.deviceSkipped) {
+      await sendMessage(adminChatId, "🔌 Устройство: не приложено (мастер выбрал «Без устройства»)");
     }
     return;
   }
@@ -1198,6 +1265,7 @@ async function onCallback(cb) {
       devicePhotoId: null,
       carNumberSkipped: false,
       odometerSkipped: false,
+      deviceSkipped: false,
 
       status: "NEW",
     };
@@ -1223,6 +1291,36 @@ async function onCallback(cb) {
       `✅ Мастер выбран.\n📍 Город: ${order.city}\n👷 Мастер: ${order.masterName}\n\nВыберите тип заявки:`,
       { reply_markup: orderTypeKeyboard() }
     );
+    return;
+  }
+
+  // ADMIN: выбрал мастера для чата
+  if (data.startsWith("ADMIN_CHAT_MASTER:")) {
+    const st = getState(chatId);
+    if (!st || st.step !== "ADMIN_CHAT_PICK_MASTER") {
+      await sendMessage(chatId, "⚠️ Сессия чата устарела. Нажмите «💬 Продолжить чат» ещё раз.", {
+        reply_markup: menuKeyboardForChat(chatId),
+      });
+      return;
+    }
+
+    const masterTgId = Number(data.split(":")[1]);
+    const master = MASTERS.find((m) => Number(m.tgId) === masterTgId);
+    if (!master) {
+      clearState(chatId);
+      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+
+    setState(chatId, "ADMIN_CHAT_WITH_MASTER", { masterTgId: master.tgId });
+    await editMessage(
+      chatId,
+      messageId,
+      `💬 Чат с мастером ${master.name} (${master.city}).\nНапишите сообщение. Для выхода нажмите «❌ Отмена».`
+    );
+    await sendMessage(chatId, "Можете писать сообщение мастеру.", {
+      reply_markup: adminMenuReplyKeyboard(),
+    });
     return;
   }
 
