@@ -34,6 +34,7 @@ const MAIN_ADMIN_ID = 7862998301;
 const MASTERS = [
   { tgId: 7692783802, name: "Иброхимчон", city: "Худжанд" },
   { tgId: 6771517500, name: "Акаи Шухрат", city: "Бохтар" },
+  { tgId: 1987607156, name: "Азизчон", city: "Худжанд" },
 ];
 
 // Опции (выбирает АДМИН)
@@ -207,20 +208,30 @@ function masterOrderKeyboard(orderId) {
   };
 }
 
-// Три кнопки для фото по прибытии клиента (показываем только то, что ещё не загружено)
+// Кнопки для фото по прибытии клиента: фото или «Без номера»/«Без пробега»
 function masterArrivalPhotoKeyboard(orderId, order) {
-  const row = [];
-  if (!order.carNumberPhotoId) {
-    row.push({ text: "📷 Фото номера", callback_data: `MASTER_PHOTO:${orderId}:PLATE` });
+  const rows = [];
+  const hasNumber = order.carNumberPhotoId || order.carNumberSkipped;
+  const hasOdometer = order.odometerPhotoId || order.odometerSkipped;
+  const hasDevice = !!order.devicePhotoId;
+
+  if (!hasNumber) {
+    rows.push([
+      { text: "📷 Фото номера", callback_data: `MASTER_PHOTO:${orderId}:PLATE` },
+      { text: "⏭ Без номера", callback_data: `MASTER_SKIP:${orderId}:PLATE` },
+    ]);
   }
-  if (!order.odometerPhotoId) {
-    row.push({ text: "📷 Фото пробега", callback_data: `MASTER_PHOTO:${orderId}:ODOMETER` });
+  if (!hasOdometer) {
+    rows.push([
+      { text: "📷 Фото пробега", callback_data: `MASTER_PHOTO:${orderId}:ODOMETER` },
+      { text: "⏭ Без пробега", callback_data: `MASTER_SKIP:${orderId}:ODOMETER` },
+    ]);
   }
-  if (!order.devicePhotoId) {
-    row.push({ text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` });
+  if (!hasDevice) {
+    rows.push([{ text: "📷 Фото устройства", callback_data: `MASTER_PHOTO:${orderId}:DEVICE` }]);
   }
-  if (row.length === 0) return null;
-  return { inline_keyboard: [row] };
+  if (rows.length === 0) return null;
+  return { inline_keyboard: rows };
 }
 
 function pad2(n) {
@@ -317,17 +328,6 @@ function masterHourKeyboard(orderId, yyyymmdd) {
     );
   }
   rows.push([{ text: "⬅ Дата", callback_data: `MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
-  rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
-  return { inline_keyboard: rows };
-}
-
-// Минуты — один столбец (как список по скроллу)
-function masterMinuteKeyboard(orderId, yyyymmdd, hh) {
-  const mins = ["00", "15", "30", "45"];
-  const rows = mins.map((mm) => [
-    { text: `${hh}:${mm}`, callback_data: `MM:${orderId}:${yyyymmdd}:${hh}:${mm}` },
-  ]);
-  rows.push([{ text: "⬅ Час", callback_data: `MBH:${orderId}:${yyyymmdd}` }]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
 }
@@ -584,13 +584,18 @@ async function onMessage(message) {
     );
     if (order.carNumberPhotoId) {
       await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
+    } else if (order.carNumberSkipped) {
+      await sendMessage(adminChatId, "🚗 Номер автомобиля: не приложен (мастер выбрал «Без номера»)");
     }
     if (order.odometerPhotoId) {
       await sendPhoto(adminChatId, order.odometerPhotoId, "📷 Пробег спидометра");
+    } else if (order.odometerSkipped) {
+      await sendMessage(adminChatId, "📏 Пробег: не приложен (мастер выбрал «Без пробега»)");
     }
     if (order.devicePhotoId) {
       await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
     }
+    return;
   }
 
    // ADMIN: ждём ввод произвольного периода отчёта
@@ -784,27 +789,15 @@ async function onCallback(cb) {
     return;
   }
 
-  // MASTER: выбор часа
+  // MASTER: выбор часа -> сразу финал (минуты не выбираем, всегда :00)
   if (data.startsWith("MH:")) {
     const [, orderId, yyyymmdd, hh] = data.split(":");
-    const order = orders.get(orderId);
-    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
-    setState(chatId, "MASTER_PICK_MINUTE", { orderId, yyyymmdd, hh });
-    await editMessage(chatId, messageId, `🕒 Выберите минуты для ${hh}:`, {
-      reply_markup: masterMinuteKeyboard(orderId, yyyymmdd, hh),
-    });
-    return;
-  }
-
-  // MASTER: выбор минут -> финал: отправка админу
-  if (data.startsWith("MM:")) {
-    const [, orderId, yyyymmdd, hh, mm] = data.split(":");
     const order = orders.get(orderId);
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
     const d = parseYyyymmdd(yyyymmdd);
     if (!d) return;
-    const timeText = `${pad2(d.d)}.${pad2(d.mo)}.${d.y} ${hh}:${mm}`;
+    const timeText = `${pad2(d.d)}.${pad2(d.mo)}.${d.y} ${hh}:00`;
 
     order.masterSuggestedTimeText = timeText;
     order.status = "WAIT_ADMIN_CONFIRM_TIME";
@@ -844,18 +837,6 @@ async function onCallback(cb) {
     setState(chatId, "MASTER_PICK_DATE", { orderId, yyyymm });
     await editMessage(chatId, messageId, "📅 Выберите дату визита:", {
       reply_markup: masterCalendarKeyboard(orderId, yyyymm),
-    });
-    return;
-  }
-
-  // MASTER: назад к часам (из выбора минут)
-  if (data.startsWith("MBH:")) {
-    const [, orderId, yyyymmdd] = data.split(":");
-    const order = orders.get(orderId);
-    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
-    setState(chatId, "MASTER_PICK_HOUR", { orderId, yyyymmdd });
-    await editMessage(chatId, messageId, "🕒 Выберите час:", {
-      reply_markup: masterHourKeyboard(orderId, yyyymmdd),
     });
     return;
   }
@@ -953,7 +934,7 @@ async function onCallback(cb) {
     await editMessage(
       chatId,
       messageId,
-      `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nВыберите, какое фото отправить:`,
+      `🚗 Клиент по заявке #${order.id} прибыл в сервис.\n\nНажмите нужную кнопку ниже, затем 📎 (скрепка) → «Фото» или «Камера»:`,
       { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
     );
 
@@ -980,9 +961,58 @@ async function onCallback(cb) {
     await editMessage(
       chatId,
       messageId,
-      `📸 Отправьте фото ${label} в чат.`,
+      `📸 Фото ${label}\n\nНажмите 📎 (скрепка) рядом с полем ввода → выберите «Фото» или «Камера» и отправьте снимок.`,
       { reply_markup: masterArrivalPhotoKeyboard(orderId, order) }
     );
+    return;
+  }
+
+  // MASTER: нажал «Без номера» или «Без пробега»
+  if (data.startsWith("MASTER_SKIP:")) {
+    const [, orderId, skipType] = data.split(":");
+    const order = orders.get(orderId);
+    if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
+
+    if (skipType === "PLATE") order.carNumberSkipped = true;
+    else if (skipType === "ODOMETER") order.odometerSkipped = true;
+
+    const kb = masterArrivalPhotoKeyboard(orderId, order);
+    if (kb) {
+      const skipLabel = skipType === "PLATE" ? "номера" : "пробега";
+      await editMessage(
+        chatId,
+        messageId,
+        `⏭ Учтено: без ${skipLabel}. Выберите следующее:`,
+        { reply_markup: kb }
+      );
+      return;
+    }
+
+    order.status = "DONE";
+    clearState(chatId);
+    await editMessage(chatId, messageId, `✅ Все данные по заявке #${order.id} сохранены.`);
+    await sendMessage(chatId, "Готово.", { reply_markup: masterMenuReplyKeyboard() });
+
+    const adminChatId = order.adminChatId || MAIN_ADMIN_ID;
+    await sendMessage(
+      adminChatId,
+      `✅ Клиент по заявке #${order.id} обслужен.\n` +
+        `👷 Мастер: ${order.masterName}\n` +
+        `🚗/🏢: ${logisticsLabel(order)}`
+    );
+    if (order.carNumberPhotoId) {
+      await sendPhoto(adminChatId, order.carNumberPhotoId, "📷 Номер автомобиля");
+    } else if (order.carNumberSkipped) {
+      await sendMessage(adminChatId, "🚗 Номер автомобиля: не приложен (мастер выбрал «Без номера»)");
+    }
+    if (order.odometerPhotoId) {
+      await sendPhoto(adminChatId, order.odometerPhotoId, "📷 Пробег спидометра");
+    } else if (order.odometerSkipped) {
+      await sendMessage(adminChatId, "📏 Пробег: не приложен (мастер выбрал «Без пробега»)");
+    }
+    if (order.devicePhotoId) {
+      await sendPhoto(adminChatId, order.devicePhotoId, "📷 Устройство / серийный номер");
+    }
     return;
   }
 
@@ -1028,6 +1058,8 @@ async function onCallback(cb) {
       carNumberPhotoId: null,
       odometerPhotoId: null,
       devicePhotoId: null,
+      carNumberSkipped: false,
+      odometerSkipped: false,
 
       status: "NEW",
     };
@@ -1196,6 +1228,8 @@ function endOfDay(d) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
 }
 
+const REPORT_TIMEZONE = "Asia/Dushanbe";
+
 function formatDate(d) {
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -1207,6 +1241,27 @@ function formatTime(d) {
   const h = String(d.getHours()).padStart(2, "0");
   const m = String(d.getMinutes()).padStart(2, "0");
   return `${h}:${m}`;
+}
+
+// Дата и время в часовом поясе отчёта (Excel)
+function formatDateInTz(d, tz = REPORT_TIMEZONE) {
+  if (!d || !(d instanceof Date) || isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("ru-RU", {
+    timeZone: tz,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(d).replace(/\//g, ".");
+}
+
+function formatTimeInTz(d, tz = REPORT_TIMEZONE) {
+  if (!d || !(d instanceof Date) || isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("ru-RU", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
 }
 
 // Предустановленные периоды
@@ -1367,8 +1422,8 @@ function buildExcelReport(from, to, opts = {}) {
     const d = o.createdAt ? new Date(o.createdAt) : null;
     rows.push([
       i + 1,
-      d ? formatDate(d) : "",
-      d ? formatTime(d) : "",
+      d ? formatDateInTz(d) : "",
+      d ? formatTimeInTz(d) : "",
       o.type === "INSTALL" ? "Монтаж" : "Ремонт/другое",
       o.type === "INSTALL" ? (o.option || "—") : "—",
       o.city || "—",
