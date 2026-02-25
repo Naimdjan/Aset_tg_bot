@@ -37,6 +37,7 @@ function isAuthorized(chatId) {
 }
 function setAuthorized(chatId) {
   authorizedChatIds.add(String(chatId));
+  saveData();
 }
 
 // =============================
@@ -1023,6 +1024,12 @@ async function onMessage(message) {
 
     order.adminComment = text;
     order.status = "SENT_TO_MASTER";
+    logEvent({
+      actorId: chatId,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
 
     clearState(chatId);
 
@@ -1382,11 +1389,23 @@ async function onCallback(cb) {
       if (st.data.pending) {
         filePath = buildExcelReportPending({ scope, masterTgId });
         await sendDocument(chatId, filePath, "📋 Ожидающие заявки");
+        logEvent({
+          actorId: cb.from && cb.from.id,
+          action: "excel_export_pending",
+          targetId: null,
+          meta: { scope, masterTgId },
+        });
       } else {
         const from = new Date(st.data.fromTs);
         const to = new Date(st.data.toTs);
         filePath = buildExcelReport(from, to, { scope, masterTgId });
         await sendDocument(chatId, filePath, `📊 Отчёт ${formatDate(from)}–${formatDate(to)}`);
+        logEvent({
+          actorId: cb.from && cb.from.id,
+          action: "excel_export_report",
+          targetId: null,
+          meta: { scope, masterTgId, from: from.toISOString(), to: to.toISOString() },
+        });
       }
       fs.unlink(filePath, () => {});
     } catch (err) {
@@ -1419,6 +1438,12 @@ async function onCallback(cb) {
     const dayChoice = data.split(":")[2]; // TODAY | TOMORROW
 
     order.status = "ACCEPTED_BY_MASTER";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
     if (!order.acceptedAt) order.acceptedAt = new Date().toISOString();
     await editMessage(
       chatId,
@@ -1586,6 +1611,12 @@ async function onCallback(cb) {
     }
 
     order.status = "DECLINED_BY_MASTER";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
     await editMessage(
       chatId,
       messageId,
@@ -1616,6 +1647,12 @@ async function onCallback(cb) {
 
     order.confirmedTimeText = order.masterSuggestedTimeText || "";
     order.status = "TIME_CONFIRMED";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
 
     await editMessage(
       chatId,
@@ -1708,6 +1745,12 @@ async function onCallback(cb) {
     const timeText = `${pad2(d.d)}.${pad2(d.mo)}.${d.y} ${hh}:00`;
     order.adminSuggestedTimeText = timeText;
     order.status = "WAIT_MASTER_CONFIRM_TIME";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
     clearState(chatId);
     await editMessage(chatId, messageId, `✅ Вы предложили время: ${timeText}\nОтправлено мастеру на подтверждение.`);
     await sendMessage(
@@ -1734,6 +1777,12 @@ async function onCallback(cb) {
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
     order.confirmedTimeText = order.adminSuggestedTimeText || "";
     order.status = "TIME_CONFIRMED";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
     await editMessage(chatId, messageId, `✅ Время принято: ${order.confirmedTimeText}`);
     const isVisit = order.logistics === "VISIT";
     const arrivalBtnText = isVisit ? "🚗 Я у клиента" : "🚗 Клиент приехал";
@@ -1788,6 +1837,12 @@ async function onCallback(cb) {
 
     order.actualArrivalAt = new Date().toISOString();
     order.status = "CLIENT_ARRIVED";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
 
     const photoKb = masterArrivalPhotoKeyboard(orderId, order);
     const deviceUnitCount = photoKb
@@ -1952,6 +2007,12 @@ async function onCallback(cb) {
     if (!order || String(order.masterTgId) !== String(cb.from.id)) return;
 
     order.status = "DONE";
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
     order.completedAt = new Date().toISOString();
     clearState(chatId);
     await editMessage(chatId, messageId, "✅ Выполнено.", { reply_markup: { inline_keyboard: [] } });
@@ -2009,6 +2070,12 @@ async function onCallback(cb) {
     order.status = "CLOSED";
     order.closedAt = new Date().toISOString();
     order.closedBy = chatId;
+    logEvent({
+      actorId: cb.from && cb.from.id,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
     const closedDeviceLine = order.type === "INSTALL" ? `\n📦 Установлено: ${optionsLabel(order)}` : "";
     await editMessage(
       chatId, messageId,
@@ -2078,6 +2145,13 @@ async function onCallback(cb) {
       status: "NEW",
     };
     orders.set(orderId, order);
+
+    logEvent({
+      actorId: chatId,
+      action: "order_status_change",
+      targetId: order.id,
+      meta: { status: order.status },
+    });
 
     // Если тип уже задан кнопкой меню — сразу логистика
     if (order.type) {
@@ -2855,6 +2929,106 @@ function buildExcelReportPending(opts = {}) {
   return filePath;
 }
 
+async function sendAuditExcel(chatId) {
+  try {
+    const rows = [
+      ["ts", "actorId", "action", "targetId", "meta"],
+      ...auditLog.map((e) => [
+        e.ts || "",
+        e.actorId || "",
+        e.action || "",
+        e.targetId || "",
+        e.meta ? JSON.stringify(e.meta).slice(0, 500) : "",
+      ]),
+    ];
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, "AuditLog");
+    const tmpDir = os.tmpdir();
+    const filePath = path.join(tmpDir, `audit_log_${Date.now()}.xlsx`);
+    XLSX.writeFile(wb, filePath);
+    await sendDocument(chatId, filePath, "📒 Журнал (Excel)");
+    fs.unlink(filePath, () => {});
+    logEvent({
+      actorId: chatId,
+      action: "excel_export_audit",
+      targetId: null,
+      meta: { count: auditLog.length },
+    });
+  } catch (e) {
+    console.error("sendAuditExcel error:", e?.message || e);
+  }
+}
+
+async function sendContactsExcel(chatId) {
+  try {
+    const rows = [["chatId", "role", "name", "city", "username"]];
+    const seen = new Set();
+
+    function pushContact(id, role, name, city, username) {
+      const key = String(id);
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push([key, role || "", name || "", city || "", username || ""]);
+    }
+
+    // SUPER_ADMIN
+    const superProf = userProfiles[String(SUPER_ADMIN_ID)] || {};
+    pushContact(
+      SUPER_ADMIN_ID,
+      "SUPER_ADMIN",
+      superProf.name || "SUPER_ADMIN",
+      superProf.city || null,
+      superProf.username || null
+    );
+
+    // ADMIN
+    const adminProf = userProfiles[String(ADMIN_CHAT_ID)] || {};
+    pushContact(
+      ADMIN_CHAT_ID,
+      adminProf.role || "ADMIN",
+      adminProf.name || "ADMIN",
+      adminProf.city || null,
+      adminProf.username || null
+    );
+
+    // userProfiles
+    for (const [cid, prof] of Object.entries(userProfiles)) {
+      pushContact(
+        cid,
+        prof.role || (authorizedRoles.get(String(cid)) || ""),
+        prof.name || cid,
+        prof.city || null,
+        prof.username || null
+      );
+    }
+
+    // Static MASTERS not yet in profiles
+    for (const m of MASTERS) {
+      const cid = String(m.tgId);
+      if (seen.has(cid)) continue;
+      pushContact(cid, "MASTER", m.name, m.city, null);
+    }
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, "Contacts");
+    const tmpDir = os.tmpdir();
+    const filePath = path.join(tmpDir, `contacts_${Date.now()}.xlsx`);
+    XLSX.writeFile(wb, filePath);
+    await sendDocument(chatId, filePath, "📇 Контакты (Excel)");
+    fs.unlink(filePath, () => {});
+    logEvent({
+      actorId: chatId,
+      action: "excel_export_contacts",
+      targetId: null,
+      meta: { count: rows.length - 1 },
+    });
+  } catch (e) {
+    console.error("sendContactsExcel error:", e?.message || e);
+  }
+}
+
 function optionsLabel(order) {
   if (order.type !== "INSTALL") return "";
   const opts = order.options?.length ? order.options : [];
@@ -3005,6 +3179,13 @@ async function checkOrderReminders() {
         `⏱ Прошло: ${timeStr} с момента принятия${estNote}`
       );
     }
+
+    logEvent({
+      actorId: null,
+      action: "order_reminder",
+      targetId: order.id,
+      meta: { reminder, status: order.status },
+    });
   }
 }
 
