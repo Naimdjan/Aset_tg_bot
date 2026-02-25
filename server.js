@@ -1,7 +1,4 @@
 require("dotenv").config();
-// Default timezone for all Date() operations (Render/Node respects TZ)
-process.env.TZ = process.env.TZ || "Asia/Dushanbe";
-
 const express = require("express");
 const axios = require("axios");
 const XLSX = require("xlsx");
@@ -13,23 +10,6 @@ const DATA_FILE_PATH = path.join(process.cwd(), "data.json");
 
 const app = express();
 app.use(express.json());
-
-
-// =============================
-// Telegram UI helpers
-// =============================
-async function setChatMenuButtonForChat(chatId, type) {
-  // type: "commands" | "default"
-  try {
-    if (!chatId) return;
-    await tg("setChatMenuButton", {
-      chat_id: chatId,
-      menu_button: { type },
-    });
-  } catch (e) {
-    console.warn("setChatMenuButtonForChat:", e?.message || e);
-  }
-}
 
 // =============================
 // ENV
@@ -73,7 +53,7 @@ const ADMIN_CHAT_ID = 1987607156;    // админ: общается с маст
 const MASTERS = [
   { tgId: 8095234574, name: "Иброхимчон", city: "Худжанд" },
   { tgId: 1039628701, name: "Акаи Шухрат", city: "Бохтар" },
-  { tgId: 8026685490, name: "Тест", city: "Ашт" },
+  { tgId: 8026685490, name: "тест", city: "Душанбе" },
   { tgId: 1099184597, name: "Абдухалим", city: "Душанбе" },
 ];
 const authorizedMasterCity = new Map();  // chatId -> city
@@ -137,41 +117,12 @@ function saveData() {
   }
 }
 /** Запись события в auditLog. Вызов: logEvent(type, details) или logEvent({ action, actorId, targetId, meta }) */
-
-
-// -----------------------------
-// TIME (Asia/Dushanbe) helpers
-// NOTE: Date.toISOString() is always UTC ("Z"). We need TJ local time in logs/Excel.
-// -----------------------------
-function nowTjIso() {
-  const tz = "Asia/Dushanbe";
-  const d = new Date();
-  const parts = new Intl.DateTimeFormat("sv-SE", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  })
-    .formatToParts(d)
-    .reduce((acc, p) => {
-      acc[p.type] = p.value;
-      return acc;
-    }, {});
-  const ms = String(d.getMilliseconds()).padStart(3, "0");
-  // Tajikistan is UTC+05:00, no DST.
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}.${ms}+05:00`;
-}
-
 function logEvent(typeOrEv, details) {
   let entry;
   if (typeof typeOrEv === "string") {
     const d = details || {};
     entry = {
-      ts: nowTjIso(),
+      ts: new Date().toISOString(),
       action: typeOrEv,
       actorId: d.actorId ?? null,
       targetId: d.targetId ?? null,
@@ -179,17 +130,8 @@ function logEvent(typeOrEv, details) {
     };
   } else {
     const ev = typeOrEv;
-    entry = { ts: nowTjIso(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
+    entry = { ts: new Date().toISOString(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
   }
-  // Enrich actor identity (username/full name) for audit log
-  try {
-    const actorId = entry.actorId;
-    const metaUser = entry?.meta?.user || null;
-    const prof = actorId && typeof userProfiles === "object" ? userProfiles[String(actorId)] : null;
-    entry.actorUsername = metaUser?.username || prof?.username || null;
-    entry.actorName = metaUser?.name || metaUser?.fullName || prof?.name || null;
-  } catch (e) {}
-
   auditLog.push(entry);
   if (auditLog.length > 50000) auditLog.shift();
   saveData();
@@ -390,19 +332,8 @@ function adminMenuReplyKeyboard(chatId) {
     [{ text: "📋 Новая заявка" }, { text: "🔧 Ремонт / другое" }],
     [{ text: "📊 Отчёт" }, { text: "💬 Чат с мастером" }],
     [{ text: "👷 Мастера" }],
-    [{ text: "🧑‍💼💬 Чат админ↔супер" }],
     [{ text: "❌ Отмена" }],
   ];
-
-  // Private chat between Admin and Super Admin (masters never see it)
-  if (ADMIN_CHAT_ID && SUPER_ADMIN_ID) {
-    const cid = String(chatId);
-    if (cid === String(ADMIN_CHAT_ID) || cid === String(SUPER_ADMIN_ID)) {
-      const label = cid === String(SUPER_ADMIN_ID) ? "🧑‍💼💬 Чат с админом" : "🧑‍💼💬 Чат с супер-админом";
-      rows.splice(2, 0, [{ text: label }]);
-    }
-  }
-
   if (chatId != null && String(chatId) === String(SUPER_ADMIN_ID)) {
     rows.push([{ text: "📇 Контакты (Excel)" }, { text: "📒 Журнал (Excel)" }, { text: "🔁 Роли" }]);
   }
@@ -890,12 +821,12 @@ app.post("/telegram/webhook", async (req, res) => {
       else if (msg.video_note) msgType = "video_note";
       else if (msg.contact) msgType = "contact";
       else if (msg.location) msgType = "location";
-      logEvent({ actorId: msg.chat?.id, action: "message", targetId: null, meta: { type: msgType, preview: (msg.text || msg.caption || "").slice(0, 150), user: { id: msg.from?.id, username: msg.from?.username || null, fullName: [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || null } } });
+      logEvent({ actorId: msg.chat?.id, action: "message", targetId: null, meta: { type: msgType, preview: (msg.text || msg.caption || "").slice(0, 150) } });
       await onMessage(update.message);
     }
     if (update.callback_query) {
       const cq = update.callback_query;
-      logEvent({ actorId: cq.from?.id, action: "callback", targetId: null, meta: { data: (cq.data || "").slice(0, 200), user: { id: cq.from?.id, username: cq.from?.username || null, fullName: [cq.from?.first_name, cq.from?.last_name].filter(Boolean).join(" ") || null } } });
+      logEvent({ actorId: cq.from?.id, action: "callback", targetId: null, meta: { data: (cq.data || "").slice(0, 200) } });
       await onCallback(update.callback_query);
     }
   } catch (e) {
@@ -980,11 +911,9 @@ async function onMessage(message) {
   // Команды оставим, но меню выдаём без /start
   if (text === "/start") {
     const fromId = message.from?.id;
-    const isSuperAdmin = fromId != null && String(fromId) === String(SUPER_ADMIN_ID);
-    // ✅ Убираем синюю кнопку "Меню" у мастеров (Bot Menu), оставляем команды у админа
-    await setChatMenuButtonForChat(chatId, isSuperAdmin ? "commands" : "default");
-
-    const keyboard = isSuperAdmin ? adminMenuReplyKeyboard(chatId) : menuKeyboardForChat(chatId);
+    const keyboard = fromId != null && String(fromId) === String(SUPER_ADMIN_ID)
+      ? adminMenuReplyKeyboard(chatId)
+      : menuKeyboardForChat(chatId);
     await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: keyboard });
     return;
   }
@@ -1010,19 +939,6 @@ async function onMessage(message) {
     await sendMessage(chatId, "📊 Выберите период отчёта:", {
       reply_markup: reportPeriodKeyboard(),
     });
-    return;
-  }
-  // Private Admin ↔ Super Admin chat
-  if (text === "🧑‍💼💬 Чат с супер-админом" || text === "🧑‍💼💬 Чат с админом") {
-    if (!ADMIN_CHAT_ID || !SUPER_ADMIN_ID) {
-      await sendMessage(chatId, "⚠️ Не настроены ADMIN_CHAT_ID / SUPER_ADMIN_ID в переменных окружения.");
-      return;
-    }
-    const peerId = String(chatId) === String(SUPER_ADMIN_ID) ? String(ADMIN_CHAT_ID) : String(SUPER_ADMIN_ID);
-    setState(chatId, "ADMIN_SUPER_CHAT", { peerId });
-    await sendMessage(chatId, `✅ Режим чата включён. Сообщения будут отправляться напрямую.
-
-Чтобы выйти — отправьте: /cancel`);
     return;
   }
 
@@ -1237,46 +1153,6 @@ async function onMessage(message) {
     }
     return;
   }
-  // ADMIN: чат с супер-админом
-  if (st.step === "ADMIN_CHAT_WITH_SUPER") {
-    const hasContent =
-      text ||
-      message.photo ||
-      message.document ||
-      message.video ||
-      message.voice ||
-      message.audio ||
-      message.video_note ||
-      message.sticker ||
-      message.contact ||
-      message.location;
-    if (hasContent) {
-      await forwardChatMessage(message, SUPER_ADMIN_ID, "💬 Сообщение от админа");
-      await sendMessage(chatId, "✅ Отправлено супер-админу.", { reply_markup: adminMenuReplyKeyboard(chatId) });
-    }
-    return;
-  }
-
-  // SUPER_ADMIN: чат с админом
-  if (st.step === "SUPER_CHAT_WITH_ADMIN") {
-    const hasContent =
-      text ||
-      message.photo ||
-      message.document ||
-      message.video ||
-      message.voice ||
-      message.audio ||
-      message.video_note ||
-      message.sticker ||
-      message.contact ||
-      message.location;
-    if (hasContent) {
-      await forwardChatMessage(message, ADMIN_CHAT_ID, "💬 Сообщение от супер-админа");
-      await sendMessage(chatId, "✅ Отправлено админу.", { reply_markup: adminMenuReplyKeyboard(chatId) });
-    }
-    return;
-  }
-
 
   // ADMIN: ждём телефон
   if (st.step === "ADMIN_WAIT_PHONE") {
@@ -3070,23 +2946,13 @@ async function sendTextReport(chatId, from, to, opts = {}) {
     .join("\n");
 
   // По видам монтажа (опциям) — только для заявок типа INSTALL
-  // Учитываем, что в одной заявке может быть несколько опций и количество устройств по каждой опции.
-  const byOption = {}; // { [optionName]: { orders: number, devices: number } }
+  const byOption = {};
   for (const o of installs) {
-    const optsList = Array.isArray(o.options) && o.options.length ? o.options : [o.option].filter(Boolean);
-    for (const optName of optsList.length ? optsList : ["—"]) {
-      const key = optName || "—";
-      const qty =
-        (o.deviceQuantities && typeof o.deviceQuantities === "object" && Number(o.deviceQuantities[key])) ||
-        (o.devices && typeof o.devices === "object" && Number(o.devices[key])) ||
-        1;
-      if (!byOption[key]) byOption[key] = { orders: 0, devices: 0 };
-      byOption[key].orders += 1;
-      byOption[key].devices += Math.max(1, qty);
-    }
+    const opt = o.option || "—";
+    byOption[opt] = (byOption[opt] || 0) + 1;
   }
   const optionLines = Object.entries(byOption)
-    .map(([opt, v]) => `• ${opt}: заявок ${v.orders}, устройств ${v.devices}`)
+    .map(([opt, cnt]) => `• ${opt}: ${cnt}`)
     .join("\n");
 
   let header = `📊 Отчёт за период ${formatDate(from)}–${formatDate(to)}`;
@@ -3222,13 +3088,6 @@ function buildExcelReport(from, to, opts = {}) {
       "Статус",
     ],
   ];
-  // Add explicit period row at the top (useful when exporting / forwarding)
-  {
-    const headerLen = rows[0].length;
-    const periodText = `Период отчёта: ${formatDate(fromDate)}–${formatDate(toDate)} (${REPORT_TIMEZONE})`;
-    rows.unshift([periodText, ...Array(Math.max(0, headerLen - 1)).fill(" ")]);
-  }
-
 
   items.forEach((o, i) => {
     const dStart   = o.createdAt   ? new Date(o.createdAt)   : null;
@@ -3317,13 +3176,6 @@ function buildExcelReportPending(opts = {}) {
       "Статус",
     ],
   ];
-  {
-    const headerLen = rows[0].length;
-    const nowText = new Intl.DateTimeFormat("ru-RU", { timeZone: REPORT_TIMEZONE, dateStyle: "medium", timeStyle: "short" }).format(new Date());
-    const title = `Ожидающие заявки — выгрузка: ${nowText} (${REPORT_TIMEZONE})`;
-    rows.unshift([title, ...Array(Math.max(0, headerLen - 1)).fill(" ")]);
-  }
-
 
   items.forEach((o, i) => {
     const dStart  = o.createdAt   ? new Date(o.createdAt)   : null;
@@ -3387,8 +3239,6 @@ async function sendAuditExcel(chatId) {
     ws.columns = [
       { header: "ts", key: "ts", width: 24 },
       { header: "actorId", key: "actorId", width: 14 },
-      { header: "actorUsername", key: "actorUsername", width: 18 },
-      { header: "actorName", key: "actorName", width: 22 },
       { header: "action", key: "action", width: 24 },
       { header: "targetId", key: "targetId", width: 14 },
       { header: "meta", key: "meta", width: 50 },
@@ -3398,8 +3248,6 @@ async function sendAuditExcel(chatId) {
       ws.addRow({
         ts: e.ts || "",
         actorId: e.actorId ?? "",
-        actorUsername: e.actorUsername || "",
-        actorName: e.actorName || "",
         action: e.action || "",
         targetId: e.targetId ?? "",
         meta: e.meta ? JSON.stringify(e.meta).slice(0, 500) : "",
@@ -3664,20 +3512,10 @@ app.listen(PORT, async () => {
     await tg("setMyCommands", {
       commands: [{ command: "start", description: "Меню" }],
     });
-} catch (e) {
+    await tg("setChatMenuButton", { menu_button: { type: "commands" } });
+  } catch (e) {
     console.warn("setMyCommands/setChatMenuButton:", e?.message || e);
   }
 });
 
-saveData();function formatTjDateTime(value) {
-  if (!value) return "";
-  try {
-    const d = new Date(value);
-    // Asia/Dushanbe (TJ) formatting
-    return d.toLocaleString("ru-RU", { timeZone: "Asia/Dushanbe" });
-  } catch {
-    return String(value);
-  }
-}
-
-
+saveData();
