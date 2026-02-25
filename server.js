@@ -50,6 +50,12 @@ const MASTERS = [
   { tgId: 8026685490, name: "тест", city: "Душанбе" },
   { tgId: 1099184597, name: "Абдухалим", city: "Душанбе" },
 ];
+const authorizedMasterCity = new Map();  // chatId -> city
+const pendingMasterCity = new Map();     // adminChatId -> applicantChatId
+const activeMasterIds = new Set();      // активные мастера
+const inactiveMasterIds = new Set();    // неактивные мастера
+const dynamicMasters = new Map();      // chatId -> { name, city }
+MASTERS.forEach((m) => activeMasterIds.add(String(m.tgId)));
 
 // Опции сгруппированы: Устройства / Аксессуары / Другое
 const OPTIONS_DEVICES     = ["FMB920", "FMB125", "FMB140", "DUT"];
@@ -244,6 +250,7 @@ function adminMenuReplyKeyboard() {
     keyboard: [
       [{ text: "📋 Новая заявка" }, { text: "🔧 Ремонт / другое" }],
       [{ text: "📊 Отчёт" }, { text: "💬 Чат с мастером" }],
+      [{ text: "👷 Мастера" }],
       [{ text: "❌ Отмена" }],
     ],
     resize_keyboard: true,
@@ -265,26 +272,41 @@ function masterMenuReplyKeyboard() {
 }
 
 function isMasterChat(chatId) {
-  return MASTERS.some((m) => String(m.tgId) === String(chatId));
+  return activeMasterIds.has(String(chatId));
+}
+
+function getMasterLabel(tgId) {
+  const m = MASTERS.find((x) => String(x.tgId) === String(tgId));
+  if (m) return `${m.city} · ${m.name}`;
+  const d = dynamicMasters.get(String(tgId));
+  if (d) return `${d.city} · ${d.name}`;
+  return String(tgId);
+}
+function getMasterInfo(tgId) {
+  const m = MASTERS.find((x) => String(x.tgId) === String(tgId));
+  if (m) return { name: m.name, city: m.city };
+  const d = dynamicMasters.get(String(tgId));
+  if (d) return { name: d.name, city: d.city };
+  return { name: String(tgId), city: "—" };
 }
 
 function menuKeyboardForChat(chatId) {
-  if (isMasterChat(chatId) || authorizedRoles.get(String(chatId)) === "MASTER") return masterMenuReplyKeyboard();
+  if (activeMasterIds.has(String(chatId))) return masterMenuReplyKeyboard();
   return adminMenuReplyKeyboard();
 }
 
 // Inline keyboards (для выбора)
 function mastersKeyboard() {
-  const rows = MASTERS.map((m) => [
-    { text: `🏙 ${m.city}  ·  👷 ${m.name}`, callback_data: `ADMIN_PICK_MASTER:${m.tgId}` },
+  const rows = [...activeMasterIds].map((tid) => [
+    { text: `🏙 ${getMasterLabel(tid)}`, callback_data: `ADMIN_PICK_MASTER:${tid}` },
   ]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
 }
 
 function mastersChatKeyboard() {
-  const rows = MASTERS.map((m) => [
-    { text: `💬 ${m.name}  ·  🏙 ${m.city}`, callback_data: `ADMIN_CHAT_MASTER:${m.tgId}` },
+  const rows = [...activeMasterIds].map((tid) => [
+    { text: `💬 ${getMasterLabel(tid)}`, callback_data: `ADMIN_CHAT_MASTER:${tid}` },
   ]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
   return { inline_keyboard: rows };
@@ -724,7 +746,7 @@ async function onMessage(message) {
     else if (message.location) msgType = "геолокация";
     const content = message.text || message.caption || "(нет текста/подписи)";
     const reqText = `Заявка на доступ:\nchatId: ${chatId}\nusername: @${from.username || "-"}\nИмя: ${from.first_name || "-"} ${from.last_name || "-"}\nТип: ${msgType}\nСодержимое: ${content}`;
-    const approveKb = { inline_keyboard: [[{ text: "✅ Approve as MASTER", callback_data: `APPROVE_MASTER:${chatId}` }, { text: "✅ Approve as ADMIN", callback_data: `APPROVE_ADMIN:${chatId}` }], [{ text: "❌ Decline", callback_data: `DECLINE:${chatId}` }]] };
+    const approveKb = { inline_keyboard: [[{ text: "✅ Approve MASTER", callback_data: `APPROVE_MASTER:${chatId}` }, { text: "✅ Approve ADMIN", callback_data: `APPROVE_ADMIN:${chatId}` }], [{ text: "❌ Decline", callback_data: `DECLINE:${chatId}` }]] };
     await safeSend(SUPER_ADMIN_ID, reqText, { reply_markup: approveKb });
     if (String(ADMIN_CHAT_ID) !== String(SUPER_ADMIN_ID)) await safeSend(ADMIN_CHAT_ID, reqText, { reply_markup: approveKb });
     return;
@@ -733,8 +755,7 @@ async function onMessage(message) {
   // Уведомление админу при первом подключении мастера
   if (isMasterChat(chatId) && !seenMasters.has(String(chatId))) {
     seenMasters.add(String(chatId));
-    const master = MASTERS.find(m => String(m.tgId) === String(chatId));
-    const masterName = master ? `${master.name} (${master.city})` : String(chatId);
+    const masterName = getMasterLabel(chatId);
     const notifyMsg = `🟢 Мастер ${masterName} впервые подключился к боту.`;
     safeSend(SUPER_ADMIN_ID, notifyMsg);
     if (String(ADMIN_CHAT_ID) !== String(SUPER_ADMIN_ID)) safeSend(ADMIN_CHAT_ID, notifyMsg);
@@ -835,6 +856,33 @@ async function onMessage(message) {
     return;
   }
 
+  if (String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID)) {
+    if (pendingMasterCity.has(String(chatId))) {
+      const applicantChatId = pendingMasterCity.get(String(chatId));
+      const city = text.trim();
+      if (city.length < 2 || city.length > 40) {
+        await sendMessage(chatId, "Город должен быть от 2 до 40 символов. Введите снова:");
+        return;
+      }
+      pendingMasterCity.delete(String(chatId));
+      authorizedChatIds.add(String(applicantChatId));
+      authorizedRoles.set(String(applicantChatId), "MASTER");
+      authorizedMasterCity.set(String(applicantChatId), city);
+      activeMasterIds.add(String(applicantChatId));
+      dynamicMasters.set(String(applicantChatId), { name: String(applicantChatId), city });
+      await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: MASTER. Город: ${city}.`, { reply_markup: masterMenuReplyKeyboard() });
+      await sendMessage(chatId, `✅ Мастер активирован: ${city} (chatId: ${applicantChatId})`, { reply_markup: adminMenuReplyKeyboard() });
+      return;
+    }
+  }
+
+  if (text === "👷 Мастера") {
+    await sendMessage(chatId, "👷 Мастера:", {
+      reply_markup: { inline_keyboard: [[{ text: "✅ Активные", callback_data: "MLIST:ACTIVE" }, { text: "🗃 Неактивные", callback_data: "MLIST:INACTIVE" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] },
+    });
+    return;
+  }
+
   // FSM
   const st = getState(chatId);
   if (!st) {
@@ -846,8 +894,7 @@ async function onMessage(message) {
   // ADMIN: чат с выбранным мастером
   if (st.step === "ADMIN_CHAT_WITH_MASTER") {
     const masterTgId = st.data.masterTgId;
-    const master = MASTERS.find((m) => String(m.tgId) === String(masterTgId));
-    const masterName = master ? master.name : "мастер";
+    const masterName = getMasterInfo(masterTgId).name;
     const hasContent = text || message.photo || message.document || message.video ||
       message.voice || message.audio || message.video_note || message.sticker ||
       message.contact || message.location;
@@ -863,8 +910,7 @@ async function onMessage(message) {
 
   // MASTER: чат с админом
   if (st.step === "MASTER_CHAT_WITH_ADMIN") {
-    const master = MASTERS.find((m) => String(m.tgId) === String(chatId));
-    const masterName = master ? master.name : "Мастер";
+    const masterName = getMasterInfo(chatId).name;
     const hasContent = text || message.photo || message.document || message.video ||
       message.voice || message.audio || message.video_note || message.sticker ||
       message.contact || message.location;
@@ -1105,9 +1151,8 @@ async function onCallback(cb) {
   const messageId = cb.message.message_id;
   const data = cb.data || "";
 
-  if (data.startsWith("APPROVE_MASTER:") || data.startsWith("APPROVE_ADMIN:")) {
-    const role = data.startsWith("APPROVE_MASTER:") ? "MASTER" : "ADMIN";
-    const applicantChatId = data.slice(("APPROVE_" + role + ":").length);
+  if (data.startsWith("APPROVE_ADMIN:")) {
+    const applicantChatId = data.slice("APPROVE_ADMIN:".length);
     const fromId = cb.from && cb.from.id;
     const isAdmin = String(fromId) === String(SUPER_ADMIN_ID) || String(fromId) === String(ADMIN_CHAT_ID);
     if (!isAdmin) {
@@ -1115,11 +1160,23 @@ async function onCallback(cb) {
       return;
     }
     authorizedChatIds.add(String(applicantChatId));
-    authorizedRoles.set(String(applicantChatId), role);
-    const roleLabel = role === "MASTER" ? "MASTER" : "ADMIN";
-    const kb = role === "MASTER" ? masterMenuReplyKeyboard() : adminMenuReplyKeyboard();
-    await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: ${roleLabel}. Меню активировано.`, { reply_markup: kb });
+    authorizedRoles.set(String(applicantChatId), "ADMIN");
+    await sendMessage(applicantChatId, "✅ Доступ выдан. Роль: ADMIN.", { reply_markup: adminMenuReplyKeyboard() });
     await answerCb(cb.id, "Пользователь одобрен.");
+    return;
+  }
+  if (data.startsWith("APPROVE_MASTER:")) {
+    const applicantChatId = data.slice("APPROVE_MASTER:".length);
+    const fromId = cb.from && cb.from.id;
+    const isAdmin = String(fromId) === String(SUPER_ADMIN_ID) || String(fromId) === String(ADMIN_CHAT_ID);
+    if (!isAdmin) {
+      await answerCb(cb.id, "⛔ Только админ может одобрять.", true);
+      return;
+    }
+    const adminChatId = chatId;
+    pendingMasterCity.set(String(adminChatId), applicantChatId);
+    await sendMessage(adminChatId, "🏙 Введите город для мастера (текстом). Например: Душанбе");
+    await answerCb(cb.id, "Ожидаю ввод города");
     return;
   }
   if (data.startsWith("DECLINE:")) {
@@ -1165,6 +1222,44 @@ async function onCallback(cb) {
     clearState(chatId);
     await editMessage(chatId, messageId, "❌ Отменено.");
     await sendMessage(chatId, "Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
+    return;
+  }
+
+  const fromId = cb.from && cb.from.id;
+  const isAdminCb = String(fromId) === String(SUPER_ADMIN_ID) || String(fromId) === String(ADMIN_CHAT_ID);
+
+  if (data === "MLIST:ACTIVE") {
+    if (!isAdminCb) return;
+    const rows = [...activeMasterIds].map((tid) => [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }]);
+    rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+    await editMessage(chatId, messageId, "✅ Активные мастера:", { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data === "MLIST:INACTIVE") {
+    if (!isAdminCb) return;
+    const rows = [...inactiveMasterIds].map((tid) => [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }]);
+    rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+    await editMessage(chatId, messageId, "🗃 Неактивные мастера:", { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith("MASTER_DEACT:")) {
+    const tgId = data.slice("MASTER_DEACT:".length);
+    if (!isAdminCb) return;
+    activeMasterIds.delete(String(tgId));
+    inactiveMasterIds.add(String(tgId));
+    const rows = [...activeMasterIds].map((tid) => [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }]);
+    rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+    await editMessage(chatId, messageId, "✅ Активные мастера:", { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith("MASTER_ACT:")) {
+    const tgId = data.slice("MASTER_ACT:".length);
+    if (!isAdminCb) return;
+    inactiveMasterIds.delete(String(tgId));
+    activeMasterIds.add(String(tgId));
+    const rows = [...inactiveMasterIds].map((tid) => [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }]);
+    rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+    await editMessage(chatId, messageId, "🗃 Неактивные мастера:", { reply_markup: { inline_keyboard: rows } });
     return;
   }
 
@@ -1940,22 +2035,21 @@ async function onCallback(cb) {
     }
 
     const masterTgId = Number(data.split(":")[1]);
-    const master = MASTERS.find((m) => Number(m.tgId) === masterTgId);
-    if (!master) {
+    if (!activeMasterIds.has(String(masterTgId))) {
       clearState(chatId);
       await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
-
+    const masterInfo = getMasterInfo(masterTgId);
     const orderId = String(++lastOrderId);
     const order = {
       id: orderId,
       createdAt: new Date().toISOString(),
       phone: st.data.phone,
 
-      masterTgId: master.tgId,
-      masterName: master.name,
-      city: master.city,
+      masterTgId,
+      masterName: masterInfo.name,
+      city: masterInfo.city,
 
       adminChatId: chatId,
 
@@ -2019,18 +2113,17 @@ async function onCallback(cb) {
     }
 
     const masterTgId = Number(data.split(":")[1]);
-    const master = MASTERS.find((m) => Number(m.tgId) === masterTgId);
-    if (!master) {
+    if (!activeMasterIds.has(String(masterTgId))) {
       clearState(chatId);
       await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard() });
       return;
     }
-
-    setState(chatId, "ADMIN_CHAT_WITH_MASTER", { masterTgId: master.tgId });
+    const masterInfo = getMasterInfo(masterTgId);
+    setState(chatId, "ADMIN_CHAT_WITH_MASTER", { masterTgId });
     await editMessage(
       chatId,
       messageId,
-      `💬 Чат с мастером ${master.name} (${master.city}).\nНапишите сообщение. Для выхода нажмите «❌ Отмена».`
+      `💬 Чат с мастером ${masterInfo.name} (${masterInfo.city}).\nНапишите сообщение. Для выхода нажмите «❌ Отмена».`
     );
     await sendMessage(chatId, "Можете писать сообщение мастеру.", {
       reply_markup: adminMenuReplyKeyboard(),
@@ -2487,8 +2580,7 @@ async function sendTextReport(chatId, from, to, opts = {}) {
 
   let header = `📊 Отчёт за период ${formatDate(from)}–${formatDate(to)}`;
   if (scope === "MASTER" && masterTgId != null) {
-    const m = MASTERS.find((mm) => String(mm.tgId) === String(masterTgId));
-    if (m) header += `\n👷 Мастер: ${m.name}`;
+    header += `\n👷 Мастер: ${getMasterInfo(masterTgId).name}`;
   }
 
   let text =
@@ -2540,8 +2632,7 @@ async function sendPendingReport(chatId, opts = {}) {
 
   let header = "📋 Ожидающие заявки";
   if (scope === "MASTER" && masterTgId != null) {
-    const m = MASTERS.find((mm) => String(mm.tgId) === String(masterTgId));
-    if (m) header += `\n👷 Мастер: ${m.name}`;
+    header += `\n👷 Мастер: ${getMasterInfo(masterTgId).name}`;
   }
   const text = `${header}\n\nВсего: ${items.length}\n\nПо статусам:\n${statusLines}`;
 
