@@ -14,6 +14,23 @@ const DATA_FILE_PATH = path.join(process.cwd(), "data.json");
 const app = express();
 app.use(express.json());
 
+
+// =============================
+// Telegram UI helpers
+// =============================
+async function setChatMenuButtonForChat(chatId, type) {
+  // type: "commands" | "default"
+  try {
+    if (!chatId) return;
+    await tg("setChatMenuButton", {
+      chat_id: chatId,
+      menu_button: { type },
+    });
+  } catch (e) {
+    console.warn("setChatMenuButtonForChat:", e?.message || e);
+  }
+}
+
 // =============================
 // ENV
 // =============================
@@ -56,7 +73,7 @@ const ADMIN_CHAT_ID = 1987607156;    // админ: общается с маст
 const MASTERS = [
   { tgId: 8095234574, name: "Иброхимчон", city: "Худжанд" },
   { tgId: 1039628701, name: "Акаи Шухрат", city: "Бохтар" },
-  { tgId: 8026685490, name: "тест", city: "Душанбе" },
+  { tgId: 8026685490, name: "Тест", city: "Ашт" },
   { tgId: 1099184597, name: "Абдухалим", city: "Душанбе" },
 ];
 const authorizedMasterCity = new Map();  // chatId -> city
@@ -120,12 +137,41 @@ function saveData() {
   }
 }
 /** Запись события в auditLog. Вызов: logEvent(type, details) или logEvent({ action, actorId, targetId, meta }) */
+
+
+// -----------------------------
+// TIME (Asia/Dushanbe) helpers
+// NOTE: Date.toISOString() is always UTC ("Z"). We need TJ local time in logs/Excel.
+// -----------------------------
+function nowTjIso() {
+  const tz = "Asia/Dushanbe";
+  const d = new Date();
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })
+    .formatToParts(d)
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+  // Tajikistan is UTC+05:00, no DST.
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}.${ms}+05:00`;
+}
+
 function logEvent(typeOrEv, details) {
   let entry;
   if (typeof typeOrEv === "string") {
     const d = details || {};
     entry = {
-      ts: new Date().toISOString(),
+      ts: nowTjIso(),
       action: typeOrEv,
       actorId: d.actorId ?? null,
       targetId: d.targetId ?? null,
@@ -133,7 +179,7 @@ function logEvent(typeOrEv, details) {
     };
   } else {
     const ev = typeOrEv;
-    entry = { ts: new Date().toISOString(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
+    entry = { ts: nowTjIso(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
   }
   // Enrich actor identity (username/full name) for audit log
   try {
@@ -344,6 +390,7 @@ function adminMenuReplyKeyboard(chatId) {
     [{ text: "📋 Новая заявка" }, { text: "🔧 Ремонт / другое" }],
     [{ text: "📊 Отчёт" }, { text: "💬 Чат с мастером" }],
     [{ text: "👷 Мастера" }],
+    [{ text: "🧑‍💼💬 Чат админ↔супер" }],
     [{ text: "❌ Отмена" }],
   ];
 
@@ -933,9 +980,11 @@ async function onMessage(message) {
   // Команды оставим, но меню выдаём без /start
   if (text === "/start") {
     const fromId = message.from?.id;
-    const keyboard = fromId != null && String(fromId) === String(SUPER_ADMIN_ID)
-      ? adminMenuReplyKeyboard(chatId)
-      : menuKeyboardForChat(chatId);
+    const isSuperAdmin = fromId != null && String(fromId) === String(SUPER_ADMIN_ID);
+    // ✅ Убираем синюю кнопку "Меню" у мастеров (Bot Menu), оставляем команды у админа
+    await setChatMenuButtonForChat(chatId, isSuperAdmin ? "commands" : "default");
+
+    const keyboard = isSuperAdmin ? adminMenuReplyKeyboard(chatId) : menuKeyboardForChat(chatId);
     await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: keyboard });
     return;
   }
@@ -1188,6 +1237,46 @@ async function onMessage(message) {
     }
     return;
   }
+  // ADMIN: чат с супер-админом
+  if (st.step === "ADMIN_CHAT_WITH_SUPER") {
+    const hasContent =
+      text ||
+      message.photo ||
+      message.document ||
+      message.video ||
+      message.voice ||
+      message.audio ||
+      message.video_note ||
+      message.sticker ||
+      message.contact ||
+      message.location;
+    if (hasContent) {
+      await forwardChatMessage(message, SUPER_ADMIN_ID, "💬 Сообщение от админа");
+      await sendMessage(chatId, "✅ Отправлено супер-админу.", { reply_markup: adminMenuReplyKeyboard(chatId) });
+    }
+    return;
+  }
+
+  // SUPER_ADMIN: чат с админом
+  if (st.step === "SUPER_CHAT_WITH_ADMIN") {
+    const hasContent =
+      text ||
+      message.photo ||
+      message.document ||
+      message.video ||
+      message.voice ||
+      message.audio ||
+      message.video_note ||
+      message.sticker ||
+      message.contact ||
+      message.location;
+    if (hasContent) {
+      await forwardChatMessage(message, ADMIN_CHAT_ID, "💬 Сообщение от супер-админа");
+      await sendMessage(chatId, "✅ Отправлено админу.", { reply_markup: adminMenuReplyKeyboard(chatId) });
+    }
+    return;
+  }
+
 
   // ADMIN: ждём телефон
   if (st.step === "ADMIN_WAIT_PHONE") {
@@ -3309,6 +3398,8 @@ async function sendAuditExcel(chatId) {
       ws.addRow({
         ts: e.ts || "",
         actorId: e.actorId ?? "",
+        actorUsername: e.actorUsername || "",
+        actorName: e.actorName || "",
         action: e.action || "",
         targetId: e.targetId ?? "",
         meta: e.meta ? JSON.stringify(e.meta).slice(0, 500) : "",
@@ -3573,10 +3664,20 @@ app.listen(PORT, async () => {
     await tg("setMyCommands", {
       commands: [{ command: "start", description: "Меню" }],
     });
-    await tg("setChatMenuButton", { menu_button: { type: "commands" } });
-  } catch (e) {
+} catch (e) {
     console.warn("setMyCommands/setChatMenuButton:", e?.message || e);
   }
 });
 
-saveData();
+saveData();function formatTjDateTime(value) {
+  if (!value) return "";
+  try {
+    const d = new Date(value);
+    // Asia/Dushanbe (TJ) formatting
+    return d.toLocaleString("ru-RU", { timeZone: "Asia/Dushanbe" });
+  } catch {
+    return String(value);
+  }
+}
+
+
