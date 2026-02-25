@@ -26,6 +26,7 @@ function normalizePassword(s) {
 }
 const BOT_PASSWORD = normalizePassword(process.env.BOT_PASSWORD || "");
 const authorizedChatIds = new Set(); // chatId строкой
+const authorizedRoles = new Map();   // chatId -> "MASTER"|"ADMIN"
 const seenMasters = new Set();       // мастера, уже подключавшиеся (сбрасывается при рестарте)
 
 function isAllowedWithoutApproval(chatId) {
@@ -268,7 +269,8 @@ function isMasterChat(chatId) {
 }
 
 function menuKeyboardForChat(chatId) {
-  return isMasterChat(chatId) ? masterMenuReplyKeyboard() : adminMenuReplyKeyboard();
+  if (isMasterChat(chatId) || authorizedRoles.get(String(chatId)) === "MASTER") return masterMenuReplyKeyboard();
+  return adminMenuReplyKeyboard();
 }
 
 // Inline keyboards (для выбора)
@@ -722,7 +724,7 @@ async function onMessage(message) {
     else if (message.location) msgType = "геолокация";
     const content = message.text || message.caption || "(нет текста/подписи)";
     const reqText = `Заявка на доступ:\nchatId: ${chatId}\nusername: @${from.username || "-"}\nИмя: ${from.first_name || "-"} ${from.last_name || "-"}\nТип: ${msgType}\nСодержимое: ${content}`;
-    const approveKb = { inline_keyboard: [[{ text: "✅ Approve", callback_data: `APPROVE:${chatId}` }, { text: "❌ Decline", callback_data: `DECLINE:${chatId}` }]] };
+    const approveKb = { inline_keyboard: [[{ text: "✅ Approve as MASTER", callback_data: `APPROVE_MASTER:${chatId}` }, { text: "✅ Approve as ADMIN", callback_data: `APPROVE_ADMIN:${chatId}` }], [{ text: "❌ Decline", callback_data: `DECLINE:${chatId}` }]] };
     await safeSend(SUPER_ADMIN_ID, reqText, { reply_markup: approveKb });
     if (String(ADMIN_CHAT_ID) !== String(SUPER_ADMIN_ID)) await safeSend(ADMIN_CHAT_ID, reqText, { reply_markup: approveKb });
     return;
@@ -1103,21 +1105,27 @@ async function onCallback(cb) {
   const messageId = cb.message.message_id;
   const data = cb.data || "";
 
-  if (data.startsWith("APPROVE:")) {
-    const applicantChatId = data.slice("APPROVE:".length);
-    const isAdmin = String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID);
+  if (data.startsWith("APPROVE_MASTER:") || data.startsWith("APPROVE_ADMIN:")) {
+    const role = data.startsWith("APPROVE_MASTER:") ? "MASTER" : "ADMIN";
+    const applicantChatId = data.slice(("APPROVE_" + role + ":").length);
+    const fromId = cb.from && cb.from.id;
+    const isAdmin = String(fromId) === String(SUPER_ADMIN_ID) || String(fromId) === String(ADMIN_CHAT_ID);
     if (!isAdmin) {
       await answerCb(cb.id, "⛔ Только админ может одобрять.", true);
       return;
     }
     authorizedChatIds.add(String(applicantChatId));
-    await sendMessage(applicantChatId, "✅ Доступ выдан. Меню активировано.", { reply_markup: menuKeyboardForChat(applicantChatId) });
+    authorizedRoles.set(String(applicantChatId), role);
+    const roleLabel = role === "MASTER" ? "MASTER" : "ADMIN";
+    const kb = role === "MASTER" ? masterMenuReplyKeyboard() : adminMenuReplyKeyboard();
+    await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: ${roleLabel}. Меню активировано.`, { reply_markup: kb });
     await answerCb(cb.id, "Пользователь одобрен.");
     return;
   }
   if (data.startsWith("DECLINE:")) {
     const applicantChatId = data.slice("DECLINE:".length);
-    const isAdmin = String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID);
+    const fromId = cb.from && cb.from.id;
+    const isAdmin = String(fromId) === String(SUPER_ADMIN_ID) || String(fromId) === String(ADMIN_CHAT_ID);
     if (!isAdmin) {
       await answerCb(cb.id, "⛔ Только админ может отклонять.", true);
       return;
