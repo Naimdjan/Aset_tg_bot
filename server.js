@@ -1,4 +1,7 @@
 require("dotenv").config();
+// Default timezone for all Date() operations (Render/Node respects TZ)
+process.env.TZ = process.env.TZ || "Asia/Dushanbe";
+
 const express = require("express");
 const axios = require("axios");
 const XLSX = require("xlsx");
@@ -132,6 +135,15 @@ function logEvent(typeOrEv, details) {
     const ev = typeOrEv;
     entry = { ts: new Date().toISOString(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
   }
+  // Enrich actor identity (username/full name) for audit log
+  try {
+    const actorId = entry.actorId;
+    const metaUser = entry?.meta?.user || null;
+    const prof = actorId && typeof userProfiles === "object" ? userProfiles[String(actorId)] : null;
+    entry.actorUsername = metaUser?.username || prof?.username || null;
+    entry.actorName = metaUser?.name || metaUser?.fullName || prof?.name || null;
+  } catch (e) {}
+
   auditLog.push(entry);
   if (auditLog.length > 50000) auditLog.shift();
   saveData();
@@ -334,6 +346,16 @@ function adminMenuReplyKeyboard(chatId) {
     [{ text: "👷 Мастера" }],
     [{ text: "❌ Отмена" }],
   ];
+
+  // Private chat between Admin and Super Admin (masters never see it)
+  if (ADMIN_CHAT_ID && SUPER_ADMIN_ID) {
+    const cid = String(chatId);
+    if (cid === String(ADMIN_CHAT_ID) || cid === String(SUPER_ADMIN_ID)) {
+      const label = cid === String(SUPER_ADMIN_ID) ? "🧑‍💼💬 Чат с админом" : "🧑‍💼💬 Чат с супер-админом";
+      rows.splice(2, 0, [{ text: label }]);
+    }
+  }
+
   if (chatId != null && String(chatId) === String(SUPER_ADMIN_ID)) {
     rows.push([{ text: "📇 Контакты (Excel)" }, { text: "📒 Журнал (Excel)" }, { text: "🔁 Роли" }]);
   }
@@ -821,12 +843,12 @@ app.post("/telegram/webhook", async (req, res) => {
       else if (msg.video_note) msgType = "video_note";
       else if (msg.contact) msgType = "contact";
       else if (msg.location) msgType = "location";
-      logEvent({ actorId: msg.chat?.id, action: "message", targetId: null, meta: { type: msgType, preview: (msg.text || msg.caption || "").slice(0, 150) } });
+      logEvent({ actorId: msg.chat?.id, action: "message", targetId: null, meta: { type: msgType, preview: (msg.text || msg.caption || "").slice(0, 150), user: { id: msg.from?.id, username: msg.from?.username || null, fullName: [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || null } } });
       await onMessage(update.message);
     }
     if (update.callback_query) {
       const cq = update.callback_query;
-      logEvent({ actorId: cq.from?.id, action: "callback", targetId: null, meta: { data: (cq.data || "").slice(0, 200) } });
+      logEvent({ actorId: cq.from?.id, action: "callback", targetId: null, meta: { data: (cq.data || "").slice(0, 200), user: { id: cq.from?.id, username: cq.from?.username || null, fullName: [cq.from?.first_name, cq.from?.last_name].filter(Boolean).join(" ") || null } } });
       await onCallback(update.callback_query);
     }
   } catch (e) {
@@ -939,6 +961,19 @@ async function onMessage(message) {
     await sendMessage(chatId, "📊 Выберите период отчёта:", {
       reply_markup: reportPeriodKeyboard(),
     });
+    return;
+  }
+  // Private Admin ↔ Super Admin chat
+  if (text === "🧑‍💼💬 Чат с супер-админом" || text === "🧑‍💼💬 Чат с админом") {
+    if (!ADMIN_CHAT_ID || !SUPER_ADMIN_ID) {
+      await sendMessage(chatId, "⚠️ Не настроены ADMIN_CHAT_ID / SUPER_ADMIN_ID в переменных окружения.");
+      return;
+    }
+    const peerId = String(chatId) === String(SUPER_ADMIN_ID) ? String(ADMIN_CHAT_ID) : String(SUPER_ADMIN_ID);
+    setState(chatId, "ADMIN_SUPER_CHAT", { peerId });
+    await sendMessage(chatId, `✅ Режим чата включён. Сообщения будут отправляться напрямую.
+
+Чтобы выйти — отправьте: /cancel`);
     return;
   }
 
@@ -2946,13 +2981,23 @@ async function sendTextReport(chatId, from, to, opts = {}) {
     .join("\n");
 
   // По видам монтажа (опциям) — только для заявок типа INSTALL
-  const byOption = {};
+  // Учитываем, что в одной заявке может быть несколько опций и количество устройств по каждой опции.
+  const byOption = {}; // { [optionName]: { orders: number, devices: number } }
   for (const o of installs) {
-    const opt = o.option || "—";
-    byOption[opt] = (byOption[opt] || 0) + 1;
+    const optsList = Array.isArray(o.options) && o.options.length ? o.options : [o.option].filter(Boolean);
+    for (const optName of optsList.length ? optsList : ["—"]) {
+      const key = optName || "—";
+      const qty =
+        (o.deviceQuantities && typeof o.deviceQuantities === "object" && Number(o.deviceQuantities[key])) ||
+        (o.devices && typeof o.devices === "object" && Number(o.devices[key])) ||
+        1;
+      if (!byOption[key]) byOption[key] = { orders: 0, devices: 0 };
+      byOption[key].orders += 1;
+      byOption[key].devices += Math.max(1, qty);
+    }
   }
   const optionLines = Object.entries(byOption)
-    .map(([opt, cnt]) => `• ${opt}: ${cnt}`)
+    .map(([opt, v]) => `• ${opt}: заявок ${v.orders}, устройств ${v.devices}`)
     .join("\n");
 
   let header = `📊 Отчёт за период ${formatDate(from)}–${formatDate(to)}`;
@@ -3088,6 +3133,13 @@ function buildExcelReport(from, to, opts = {}) {
       "Статус",
     ],
   ];
+  // Add explicit period row at the top (useful when exporting / forwarding)
+  {
+    const headerLen = rows[0].length;
+    const periodText = `Период отчёта: ${formatDate(fromDate)}–${formatDate(toDate)} (${REPORT_TIMEZONE})`;
+    rows.unshift([periodText, ...Array(Math.max(0, headerLen - 1)).fill(" ")]);
+  }
+
 
   items.forEach((o, i) => {
     const dStart   = o.createdAt   ? new Date(o.createdAt)   : null;
@@ -3176,6 +3228,13 @@ function buildExcelReportPending(opts = {}) {
       "Статус",
     ],
   ];
+  {
+    const headerLen = rows[0].length;
+    const nowText = new Intl.DateTimeFormat("ru-RU", { timeZone: REPORT_TIMEZONE, dateStyle: "medium", timeStyle: "short" }).format(new Date());
+    const title = `Ожидающие заявки — выгрузка: ${nowText} (${REPORT_TIMEZONE})`;
+    rows.unshift([title, ...Array(Math.max(0, headerLen - 1)).fill(" ")]);
+  }
+
 
   items.forEach((o, i) => {
     const dStart  = o.createdAt   ? new Date(o.createdAt)   : null;
@@ -3239,6 +3298,8 @@ async function sendAuditExcel(chatId) {
     ws.columns = [
       { header: "ts", key: "ts", width: 24 },
       { header: "actorId", key: "actorId", width: 14 },
+      { header: "actorUsername", key: "actorUsername", width: 18 },
+      { header: "actorName", key: "actorName", width: 22 },
       { header: "action", key: "action", width: 24 },
       { header: "targetId", key: "targetId", width: 14 },
       { header: "meta", key: "meta", width: 50 },
