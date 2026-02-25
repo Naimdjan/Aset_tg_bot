@@ -2,10 +2,11 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const XLSX = require("xlsx");
+const ExcelJS = require("exceljs");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
-const DATA_FILE_PATH = path.join(__dirname, "data.json");
+const DATA_FILE_PATH = path.join(process.cwd(), "data.json");
 
 const app = express();
 app.use(express.json());
@@ -64,7 +65,11 @@ MASTERS.forEach((m) => activeMasterIds.add(String(m.tgId)));
 
 function loadData() {
   try {
-    if (!fs.existsSync(DATA_FILE_PATH)) return;
+    if (!fs.existsSync(DATA_FILE_PATH)) {
+      saveData();
+      console.log("📄 data.json создан: " + DATA_FILE_PATH);
+      return;
+    }
     const raw = fs.readFileSync(DATA_FILE_PATH, "utf8");
     const j = JSON.parse(raw);
     if (j.authorizedChatIds && Array.isArray(j.authorizedChatIds)) {
@@ -108,11 +113,25 @@ function saveData() {
     };
     fs.writeFileSync(DATA_FILE_PATH, JSON.stringify(j, null, 2), "utf8");
   } catch (e) {
-    console.error("saveData error:", e?.message || e);
+    console.error("saveData error:", e?.message || e, e);
   }
 }
-function logEvent(ev) {
-  const entry = { ts: new Date().toISOString(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
+/** Запись события в auditLog. Вызов: logEvent(type, details) или logEvent({ action, actorId, targetId, meta }) */
+function logEvent(typeOrEv, details) {
+  let entry;
+  if (typeof typeOrEv === "string") {
+    const d = details || {};
+    entry = {
+      ts: new Date().toISOString(),
+      action: typeOrEv,
+      actorId: d.actorId ?? null,
+      targetId: d.targetId ?? null,
+      meta: d.meta ?? null,
+    };
+  } else {
+    const ev = typeOrEv;
+    entry = { ts: new Date().toISOString(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
+  }
   auditLog.push(entry);
   if (auditLog.length > 50000) auditLog.shift();
   saveData();
@@ -823,13 +842,13 @@ async function onMessage(message) {
   const text = (message.text || "").trim();
   const from = message.from || {};
 
+  // При каждом сообщении обновляем профиль (имя, username)
   if (from && message.chat?.type === "private") {
     const cid = String(chatId);
     if (!userProfiles[cid]) userProfiles[cid] = {};
     userProfiles[cid].username = from.username ?? userProfiles[cid].username;
-    if (!userProfiles[cid].name && (from.first_name || from.last_name)) {
-      userProfiles[cid].name = [from.first_name, from.last_name].filter(Boolean).join(" ").trim() || userProfiles[cid].name;
-    }
+    const fullName = [from.first_name, from.last_name].filter(Boolean).join(" ").trim();
+    if (fullName) userProfiles[cid].name = fullName;
   }
 
   if (!isAuthorized(chatId)) {
@@ -891,7 +910,11 @@ async function onMessage(message) {
 
   // Команды оставим, но меню выдаём без /start
   if (text === "/start") {
-    await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: menuKeyboardForChat(chatId) });
+    const fromId = message.from?.id;
+    const keyboard = fromId != null && String(fromId) === String(SUPER_ADMIN_ID)
+      ? adminMenuReplyKeyboard(chatId)
+      : menuKeyboardForChat(chatId);
+    await sendMessage(chatId, "✅ Меню активировано.", { reply_markup: keyboard });
     return;
   }
   if (text === "/getmyid") {
@@ -1445,7 +1468,7 @@ async function onCallback(cb) {
     if (!isAdminCb) return;
     const rows = [...activeMasterIds].map((tid) => {
       const row = [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }];
-      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
       return row;
     });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
@@ -1456,7 +1479,7 @@ async function onCallback(cb) {
     if (!isAdminCb) return;
     const rows = [...inactiveMasterIds].map((tid) => {
       const row = [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }];
-      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
       return row;
     });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
@@ -1469,10 +1492,10 @@ async function onCallback(cb) {
     activeMasterIds.delete(String(tgId));
     inactiveMasterIds.add(String(tgId));
     saveData();
-    logEvent({ actorId: chatId, action: "master_deactivate", targetId: tgId, meta: null });
+    logEvent("master_deactivate", { actorId: chatId, targetId: tgId });
     const rows = [...activeMasterIds].map((tid) => {
       const row = [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }];
-      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
       return row;
     });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
@@ -1485,10 +1508,10 @@ async function onCallback(cb) {
     inactiveMasterIds.delete(String(tgId));
     activeMasterIds.add(String(tgId));
     saveData();
-    logEvent({ actorId: chatId, action: "master_activate", targetId: tgId, meta: null });
+    logEvent("master_activate", { actorId: chatId, targetId: tgId });
     const rows = [...inactiveMasterIds].map((tid) => {
       const row = [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }];
-      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
       return row;
     });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
@@ -1497,7 +1520,7 @@ async function onCallback(cb) {
   }
   if (data.startsWith("MASTER_EDIT:")) {
     const tgId = data.slice("MASTER_EDIT:".length);
-    if (!isSuperAdminCb) return;
+    if (!isAdminCb) return;
     setState(chatId, "MASTER_EDIT_NAME", { targetTgId: tgId });
     await sendMessage(chatId, "✏️ Введите новое имя мастера:");
     await answerCb(cb.id).catch(() => {});
@@ -3211,30 +3234,31 @@ function buildExcelReportPending(opts = {}) {
 
 async function sendAuditExcel(chatId) {
   try {
-    const rows = [
-      ["ts", "actorId", "action", "targetId", "meta"],
-      ...auditLog.map((e) => [
-        e.ts || "",
-        e.actorId || "",
-        e.action || "",
-        e.targetId || "",
-        e.meta ? JSON.stringify(e.meta).slice(0, 500) : "",
-      ]),
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("AuditLog", { views: [{ state: "frozen", ySplit: 1 }] });
+    ws.columns = [
+      { header: "ts", key: "ts", width: 24 },
+      { header: "actorId", key: "actorId", width: 14 },
+      { header: "action", key: "action", width: 24 },
+      { header: "targetId", key: "targetId", width: 14 },
+      { header: "meta", key: "meta", width: 50 },
     ];
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, "AuditLog");
+    ws.getRow(1).font = { bold: true };
+    for (const e of auditLog) {
+      ws.addRow({
+        ts: e.ts || "",
+        actorId: e.actorId ?? "",
+        action: e.action || "",
+        targetId: e.targetId ?? "",
+        meta: e.meta ? JSON.stringify(e.meta).slice(0, 500) : "",
+      });
+    }
     const tmpDir = os.tmpdir();
     const filePath = path.join(tmpDir, `audit_log_${Date.now()}.xlsx`);
-    XLSX.writeFile(wb, filePath);
+    await wb.xlsx.writeFile(filePath);
     await sendDocument(chatId, filePath, "📒 Журнал (Excel)");
     fs.unlink(filePath, () => {});
-    logEvent({
-      actorId: chatId,
-      action: "excel_export_audit",
-      targetId: null,
-      meta: { count: auditLog.length },
-    });
+    logEvent("excel_export_audit", { actorId: chatId, meta: { count: auditLog.length } });
   } catch (e) {
     console.error("sendAuditExcel error:", e?.message || e);
   }
@@ -3290,20 +3314,25 @@ async function sendContactsExcel(chatId) {
       pushContact(cid, "MASTER", m.name, m.city, null);
     }
 
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, "Contacts");
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Contacts", { views: [{ state: "frozen", ySplit: 1 }] });
+    ws.columns = [
+      { header: "chatId", key: "chatId", width: 14 },
+      { header: "role", key: "role", width: 14 },
+      { header: "name", key: "name", width: 24 },
+      { header: "city", key: "city", width: 18 },
+      { header: "username", key: "username", width: 18 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    for (let i = 1; i < rows.length; i++) {
+      ws.addRow(rows[i]);
+    }
     const tmpDir = os.tmpdir();
     const filePath = path.join(tmpDir, `contacts_${Date.now()}.xlsx`);
-    XLSX.writeFile(wb, filePath);
+    await wb.xlsx.writeFile(filePath);
     await sendDocument(chatId, filePath, "📇 Контакты (Excel)");
     fs.unlink(filePath, () => {});
-    logEvent({
-      actorId: chatId,
-      action: "excel_export_contacts",
-      targetId: null,
-      meta: { count: rows.length - 1 },
-    });
+    logEvent("excel_export_contacts", { actorId: chatId, meta: { count: rows.length - 1 } });
   } catch (e) {
     console.error("sendContactsExcel error:", e?.message || e);
   }
@@ -3478,11 +3507,15 @@ setInterval(checkOrderReminders, 5 * 60 * 1000);
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`✅ Server started on port ${PORT}`);
-  // Убираем кнопку «Меню» — удаляем все зарегистрированные команды
+  // Кнопка «Меню» в левом нижнем углу
   try {
-    await tg("deleteMyCommands", {});
-    await tg("setChatMenuButton", { menu_button: { type: "default" } });
+    await tg("setMyCommands", {
+      commands: [{ command: "start", description: "Меню" }],
+    });
+    await tg("setChatMenuButton", { menu_button: { type: "commands" } });
   } catch (e) {
-    console.warn("deleteMyCommands:", e?.message || e);
+    console.warn("setMyCommands/setChatMenuButton:", e?.message || e);
   }
 });
+
+saveData();
