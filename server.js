@@ -5,6 +5,7 @@ const XLSX = require("xlsx");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const DATA_FILE_PATH = path.join(__dirname, "data.json");
 
 const app = express();
 app.use(express.json());
@@ -27,7 +28,10 @@ function normalizePassword(s) {
 const BOT_PASSWORD = normalizePassword(process.env.BOT_PASSWORD || "");
 const authorizedChatIds = new Set(); // chatId строкой
 const authorizedRoles = new Map();   // chatId -> "MASTER"|"ADMIN"
+let userProfiles = {};               // chatId -> { name, city, role, username }
+let auditLog = [];                   // события аудита
 const seenMasters = new Set();       // мастера, уже подключавшиеся (сбрасывается при рестарте)
+const pendingApprovalInfo = new Map(); // applicantChatId -> { username }
 
 function isAllowedWithoutApproval(chatId) {
   return String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID) || isMasterChat(chatId);
@@ -58,6 +62,63 @@ const inactiveMasterIds = new Set();    // неактивные мастера
 const dynamicMasters = new Map();      // chatId -> { name, city }
 MASTERS.forEach((m) => activeMasterIds.add(String(m.tgId)));
 
+function loadData() {
+  try {
+    if (!fs.existsSync(DATA_FILE_PATH)) return;
+    const raw = fs.readFileSync(DATA_FILE_PATH, "utf8");
+    const j = JSON.parse(raw);
+    if (j.authorizedChatIds && Array.isArray(j.authorizedChatIds)) {
+      j.authorizedChatIds.forEach((id) => authorizedChatIds.add(String(id)));
+    }
+    if (j.authorizedRoles && typeof j.authorizedRoles === "object") {
+      for (const [k, v] of Object.entries(j.authorizedRoles)) authorizedRoles.set(String(k), v);
+    }
+    if (j.userProfiles && typeof j.userProfiles === "object") userProfiles = j.userProfiles;
+    if (j.auditLog && Array.isArray(j.auditLog)) auditLog = j.auditLog;
+    if (j.activeMasterIds && Array.isArray(j.activeMasterIds)) {
+      activeMasterIds.clear();
+      j.activeMasterIds.forEach((id) => activeMasterIds.add(String(id)));
+    }
+    if (j.inactiveMasterIds && Array.isArray(j.inactiveMasterIds)) {
+      inactiveMasterIds.clear();
+      j.inactiveMasterIds.forEach((id) => inactiveMasterIds.add(String(id)));
+    }
+    if (j.authorizedMasterCity && typeof j.authorizedMasterCity === "object") {
+      for (const [k, v] of Object.entries(j.authorizedMasterCity)) authorizedMasterCity.set(String(k), v);
+    }
+    if (j.dynamicMasters && typeof j.dynamicMasters === "object") {
+      dynamicMasters.clear();
+      for (const [k, v] of Object.entries(j.dynamicMasters)) dynamicMasters.set(String(k), v);
+    }
+  } catch (e) {
+    console.error("loadData error:", e?.message || e);
+  }
+}
+function saveData() {
+  try {
+    const j = {
+      authorizedChatIds: [...authorizedChatIds],
+      authorizedRoles: Object.fromEntries(authorizedRoles),
+      userProfiles,
+      auditLog: auditLog.slice(-50000),
+      activeMasterIds: [...activeMasterIds],
+      inactiveMasterIds: [...inactiveMasterIds],
+      authorizedMasterCity: Object.fromEntries(authorizedMasterCity),
+      dynamicMasters: Object.fromEntries(dynamicMasters),
+    };
+    fs.writeFileSync(DATA_FILE_PATH, JSON.stringify(j, null, 2), "utf8");
+  } catch (e) {
+    console.error("saveData error:", e?.message || e);
+  }
+}
+function logEvent(ev) {
+  const entry = { ts: new Date().toISOString(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
+  auditLog.push(entry);
+  if (auditLog.length > 50000) auditLog.shift();
+  saveData();
+}
+loadData();
+
 // Опции сгруппированы: Устройства / Аксессуары / Другое
 const OPTIONS_DEVICES     = ["FMB920", "FMB125", "FMB140", "DUT"];
 const OPTIONS_ACCESSORIES = ["Реле", "Temp."];
@@ -87,6 +148,7 @@ function getPhotoSlots(order) {
   const addUnitSlots = (name, unitIdx, hasDut) => {
     const n = unitIdx + 1;
     slots.push({ key: `${name}_${unitIdx}_device`,   label: `${name}-${n}`,         deviceName: name, photoType: "device",   unitIdx, required: true  });
+    if (name === "DUT") return; // DUT: только фото устройства, без пробега/номера
     if (hasDut) {
       slots.push({ key: `${name}_${unitIdx}_dut`,    label: `DUT-${n}|${name}-${n}`, deviceName: name, photoType: "dut",      unitIdx, required: true  });
     }
@@ -246,14 +308,18 @@ async function sendDocument(chatId, filePath, caption) {
 // =============================
 
 // ✅ Главное меню — Reply Keyboard (кнопки прямо в строке ввода, без /start)
-function adminMenuReplyKeyboard() {
+function adminMenuReplyKeyboard(chatId) {
+  const rows = [
+    [{ text: "📋 Новая заявка" }, { text: "🔧 Ремонт / другое" }],
+    [{ text: "📊 Отчёт" }, { text: "💬 Чат с мастером" }],
+    [{ text: "👷 Мастера" }],
+    [{ text: "❌ Отмена" }],
+  ];
+  if (chatId != null && String(chatId) === String(SUPER_ADMIN_ID)) {
+    rows.push([{ text: "📇 Контакты (Excel)" }, { text: "📒 Журнал (Excel)" }, { text: "🔁 Роли" }]);
+  }
   return {
-    keyboard: [
-      [{ text: "📋 Новая заявка" }, { text: "🔧 Ремонт / другое" }],
-      [{ text: "📊 Отчёт" }, { text: "💬 Чат с мастером" }],
-      [{ text: "👷 Мастера" }],
-      [{ text: "❌ Отмена" }],
-    ],
+    keyboard: rows,
     resize_keyboard: true,
     one_time_keyboard: false,
     selective: false,
@@ -277,23 +343,29 @@ function isMasterChat(chatId) {
 }
 
 function getMasterLabel(tgId) {
-  const m = MASTERS.find((x) => String(x.tgId) === String(tgId));
+  const sid = String(tgId);
+  const prof = userProfiles[sid];
+  if (prof && (prof.name || prof.city)) return `${prof.city || "—"} · ${prof.name || sid}`;
+  const m = MASTERS.find((x) => String(x.tgId) === sid);
   if (m) return `${m.city} · ${m.name}`;
-  const d = dynamicMasters.get(String(tgId));
+  const d = dynamicMasters.get(sid);
   if (d) return `${d.city} · ${d.name}`;
-  return String(tgId);
+  return sid;
 }
 function getMasterInfo(tgId) {
-  const m = MASTERS.find((x) => String(x.tgId) === String(tgId));
+  const sid = String(tgId);
+  const prof = userProfiles[sid];
+  if (prof) return { name: prof.name || sid, city: prof.city || "—" };
+  const m = MASTERS.find((x) => String(x.tgId) === sid);
   if (m) return { name: m.name, city: m.city };
-  const d = dynamicMasters.get(String(tgId));
+  const d = dynamicMasters.get(sid);
   if (d) return { name: d.name, city: d.city };
-  return { name: String(tgId), city: "—" };
+  return { name: sid, city: "—" };
 }
 
 function menuKeyboardForChat(chatId) {
   if (activeMasterIds.has(String(chatId))) return masterMenuReplyKeyboard();
-  return adminMenuReplyKeyboard();
+  return adminMenuReplyKeyboard(chatId);
 }
 
 // Inline keyboards (для выбора)
@@ -719,8 +791,25 @@ app.post("/telegram/webhook", async (req, res) => {
       dedupe.set(update.update_id, Date.now());
     }
 
-    if (update.message) await onMessage(update.message);
-    if (update.callback_query) await onCallback(update.callback_query);
+    if (update.message) {
+      const msg = update.message;
+      let msgType = "text";
+      if (msg.photo) msgType = "photo";
+      else if (msg.document) msgType = "document";
+      else if (msg.video) msgType = "video";
+      else if (msg.voice) msgType = "voice";
+      else if (msg.sticker) msgType = "sticker";
+      else if (msg.video_note) msgType = "video_note";
+      else if (msg.contact) msgType = "contact";
+      else if (msg.location) msgType = "location";
+      logEvent({ actorId: msg.chat?.id, action: "message", targetId: null, meta: { type: msgType, preview: (msg.text || msg.caption || "").slice(0, 150) } });
+      await onMessage(update.message);
+    }
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      logEvent({ actorId: cq.from?.id, action: "callback", targetId: null, meta: { data: (cq.data || "").slice(0, 200) } });
+      await onCallback(update.callback_query);
+    }
   } catch (e) {
     console.error("Webhook error:", e?.message || e);
   }
@@ -732,10 +821,20 @@ app.post("/telegram/webhook", async (req, res) => {
 async function onMessage(message) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
+  const from = message.from || {};
+
+  if (from && message.chat?.type === "private") {
+    const cid = String(chatId);
+    if (!userProfiles[cid]) userProfiles[cid] = {};
+    userProfiles[cid].username = from.username ?? userProfiles[cid].username;
+    if (!userProfiles[cid].name && (from.first_name || from.last_name)) {
+      userProfiles[cid].name = [from.first_name, from.last_name].filter(Boolean).join(" ").trim() || userProfiles[cid].name;
+    }
+  }
 
   if (!isAuthorized(chatId)) {
     await sendMessage(chatId, "⛔ Доступ не выдан. Запрос отправлен администратору.");
-    const from = message.from || {};
+    pendingApprovalInfo.set(String(chatId), { username: from.username });
     let msgType = "текст";
     if (message.photo) msgType = "фото";
     else if (message.document) msgType = "документ";
@@ -847,34 +946,141 @@ async function onMessage(message) {
 
   if (text === "📋 Новая заявка") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "INSTALL" });
-    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
+    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard(chatId) });
     return;
   }
 
   if (text === "🔧 Ремонт / другое") {
     setState(chatId, "ADMIN_WAIT_PHONE", { presetType: "REPAIR" });
-    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard() });
+    await sendMessage(chatId, "📞 Введите номер телефона клиента:", { reply_markup: adminMenuReplyKeyboard(chatId) });
     return;
   }
 
   if (String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID)) {
-    if (pendingMasterCity.has(String(chatId))) {
-      const applicantChatId = pendingMasterCity.get(String(chatId));
+    const stApp = getState(chatId);
+    if (stApp && stApp.step === "APPROVE_MASTER_NAME") {
+      const applicantChatId = stApp.data.applicantChatId;
+      const name = text.trim();
+      if (!name || name.length > 80) {
+        await sendMessage(chatId, "Имя от 1 до 80 символов. Введите снова:");
+        return;
+      }
+      setState(chatId, "APPROVE_MASTER_CITY", { applicantChatId, name });
+      await sendMessage(chatId, "🏙 Введите город для мастера (текстом). Например: Душанбе");
+      return;
+    }
+    if (stApp && stApp.step === "APPROVE_MASTER_CITY") {
+      const applicantChatId = stApp.data.applicantChatId;
+      const name = stApp.data.name;
       const city = text.trim();
       if (city.length < 2 || city.length > 40) {
         await sendMessage(chatId, "Город должен быть от 2 до 40 символов. Введите снова:");
         return;
       }
-      pendingMasterCity.delete(String(chatId));
+      clearState(chatId);
+      const username = pendingApprovalInfo.get(String(applicantChatId))?.username ?? userProfiles[String(applicantChatId)]?.username;
+      pendingApprovalInfo.delete(String(applicantChatId));
       authorizedChatIds.add(String(applicantChatId));
       authorizedRoles.set(String(applicantChatId), "MASTER");
       authorizedMasterCity.set(String(applicantChatId), city);
       activeMasterIds.add(String(applicantChatId));
-      dynamicMasters.set(String(applicantChatId), { name: String(applicantChatId), city });
-      await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: MASTER. Город: ${city}.`, { reply_markup: masterMenuReplyKeyboard() });
-      await sendMessage(chatId, `✅ Мастер активирован: ${city} (chatId: ${applicantChatId})`, { reply_markup: adminMenuReplyKeyboard() });
+      dynamicMasters.set(String(applicantChatId), { name, city });
+      userProfiles[String(applicantChatId)] = { name, city, role: "MASTER", username: username ?? null };
+      saveData();
+      logEvent({ actorId: chatId, action: "approve_master", targetId: applicantChatId, meta: { name, city } });
+      await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: MASTER. Город: ${city}. Меню активировано.`, { reply_markup: masterMenuReplyKeyboard() });
+      await sendMessage(chatId, `✅ Мастер активирован: ${name}, ${city} (chatId: ${applicantChatId})`, { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
+    if (stApp && stApp.step === "APPROVE_ADMIN_NAME") {
+      const applicantChatId = stApp.data.applicantChatId;
+      const name = text.trim();
+      if (!name || name.length > 80) {
+        await sendMessage(chatId, "Имя от 1 до 80 символов. Введите снова:");
+        return;
+      }
+      clearState(chatId);
+      const username = pendingApprovalInfo.get(String(applicantChatId))?.username ?? userProfiles[String(applicantChatId)]?.username;
+      pendingApprovalInfo.delete(String(applicantChatId));
+      authorizedChatIds.add(String(applicantChatId));
+      authorizedRoles.set(String(applicantChatId), "ADMIN");
+      userProfiles[String(applicantChatId)] = { name, city: null, role: "ADMIN", username: username ?? null };
+      saveData();
+      logEvent({ actorId: chatId, action: "approve_admin", targetId: applicantChatId, meta: { name } });
+      await sendMessage(applicantChatId, "✅ Доступ выдан. Роль: ADMIN. Меню активировано.", { reply_markup: adminMenuReplyKeyboard(applicantChatId) });
+      await sendMessage(chatId, `✅ Пользователь одобрен как ADMIN: ${name} (chatId: ${applicantChatId})`, { reply_markup: adminMenuReplyKeyboard(chatId) });
+      return;
+    }
+    if (stApp && stApp.step === "MASTER_EDIT_NAME") {
+      const targetTgId = stApp.data.targetTgId;
+      const name = text.trim();
+      if (!name || name.length > 80) {
+        await sendMessage(chatId, "Имя от 1 до 80 символов. Введите снова:");
+        return;
+      }
+      setState(chatId, "MASTER_EDIT_CITY", { targetTgId, name });
+      await sendMessage(chatId, "🏙 Введите город для мастера:");
+      return;
+    }
+    if (stApp && stApp.step === "MASTER_EDIT_CITY") {
+      const targetTgId = stApp.data.targetTgId;
+      const name = stApp.data.name;
+      const city = text.trim();
+      if (city.length < 2 || city.length > 40) {
+        await sendMessage(chatId, "Город от 2 до 40 символов. Введите снова:");
+        return;
+      }
+      clearState(chatId);
+      const sid = String(targetTgId);
+      if (userProfiles[sid]) { userProfiles[sid].name = name; userProfiles[sid].city = city; }
+      else userProfiles[sid] = { name, city, role: "MASTER", username: null };
+      dynamicMasters.set(sid, { name, city });
+      authorizedMasterCity.set(sid, city);
+      saveData();
+      logEvent({ actorId: chatId, action: "master_edit", targetId: targetTgId, meta: { name, city } });
+      await sendMessage(chatId, `✅ Мастер обновлён: ${name}, ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
+      return;
+    }
+    if (stApp && stApp.step === "ROLE_SET_MASTER_CITY") {
+      const targetTgId = stApp.data.targetTgId;
+      const city = text.trim();
+      if (city.length < 2 || city.length > 40) {
+        await sendMessage(chatId, "Город от 2 до 40 символов. Введите снова:");
+        return;
+      }
+      clearState(chatId);
+      const sid = String(targetTgId);
+      authorizedRoles.set(sid, "MASTER");
+      activeMasterIds.add(sid);
+      if (userProfiles[sid]) { userProfiles[sid].role = "MASTER"; userProfiles[sid].city = city; }
+      else userProfiles[sid] = { name: sid, city, role: "MASTER", username: null };
+      authorizedMasterCity.set(sid, city);
+      dynamicMasters.set(sid, { name: userProfiles[sid].name || sid, city });
+      saveData();
+      logEvent({ actorId: chatId, action: "role_change_master", targetId: targetTgId, meta: { city } });
+      await sendMessage(chatId, `✅ Роль установлена: MASTER, город ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
+      return;
+    }
+  }
+
+  if (text === "📒 Журнал (Excel)" && String(chatId) === String(SUPER_ADMIN_ID)) {
+    await sendAuditExcel(chatId);
+    return;
+  }
+  if (text === "📇 Контакты (Excel)" && String(chatId) === String(SUPER_ADMIN_ID)) {
+    await sendContactsExcel(chatId);
+    return;
+  }
+  if (text === "🔁 Роли" && String(chatId) === String(SUPER_ADMIN_ID)) {
+    const entries = [...authorizedRoles.entries()].filter(([, role]) => role === "ADMIN" || role === "MASTER");
+    const rows = entries.slice(0, 50).map(([cid, role]) => {
+      const p = userProfiles[cid];
+      const label = (p && p.name) ? `${p.name} (${role})` : `${cid} (${role})`;
+      return [{ text: label, callback_data: `ROLE_EDIT:${cid}` }];
+    });
+    rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
+    await sendMessage(chatId, "🔁 Смена ролей. Выберите пользователя:", { reply_markup: { inline_keyboard: rows } });
+    return;
   }
 
   if (text === "👷 Мастера") {
@@ -904,7 +1110,7 @@ async function onMessage(message) {
       if (String(chatId) === String(ADMIN_CHAT_ID)) {
         await forwardChatMessage(message, SUPER_ADMIN_ID, `📡 Чат админа с мастером ${masterName}`);
       }
-      await sendMessage(chatId, `✅ Отправлено ${masterName}.`, { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, `✅ Отправлено ${masterName}.`, { reply_markup: adminMenuReplyKeyboard(chatId) });
     }
     return;
   }
@@ -933,14 +1139,14 @@ async function onMessage(message) {
         ? `Введено ${phoneDigits.length} цифр — не хватает ${9 - phoneDigits.length}.`
         : `Введено ${phoneDigits.length} цифр — лишние ${phoneDigits.length - 9}.`;
       await sendMessage(chatId, `⚠️ Номер телефона должен содержать строго 9 цифр (без кода страны).\n${hint}\nПопробуйте ещё раз.`, {
-        reply_markup: adminMenuReplyKeyboard(),
+        reply_markup: adminMenuReplyKeyboard(chatId),
       });
       return;
     }
     st.data.phone = phoneDigits;
     setState(chatId, "ADMIN_WAIT_MASTER", st.data);
     await sendMessage(chatId, "Выберите мастера (город подтянется автоматически):", {
-      reply_markup: adminMenuReplyKeyboard(),
+      reply_markup: adminMenuReplyKeyboard(chatId),
     });
     await sendMessage(chatId, "Список мастеров:", { reply_markup: mastersKeyboard() });
     return;
@@ -952,7 +1158,7 @@ async function onMessage(message) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -984,7 +1190,7 @@ async function onMessage(message) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     const qty = parseInt(text, 10);
@@ -1018,7 +1224,7 @@ async function onMessage(message) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -1037,7 +1243,7 @@ async function onMessage(message) {
     await sendOrderToMaster(order);
 
     // подтверждение админу
-    await sendMessage(chatId, formatAdminConfirm(order), { reply_markup: adminMenuReplyKeyboard() });
+    await sendMessage(chatId, formatAdminConfirm(order), { reply_markup: adminMenuReplyKeyboard(chatId) });
     return;
   }
 
@@ -1166,10 +1372,9 @@ async function onCallback(cb) {
       await answerCb(cb.id, "⛔ Только админ может одобрять.", true);
       return;
     }
-    authorizedChatIds.add(String(applicantChatId));
-    authorizedRoles.set(String(applicantChatId), "ADMIN");
-    await sendMessage(applicantChatId, "✅ Доступ выдан. Роль: ADMIN.", { reply_markup: adminMenuReplyKeyboard() });
-    await answerCb(cb.id, "Пользователь одобрен.");
+    setState(chatId, "APPROVE_ADMIN_NAME", { applicantChatId });
+    await sendMessage(chatId, "✏️ Введите имя пользователя (для роли ADMIN):");
+    await answerCb(cb.id, "Ожидаю ввод имени");
     return;
   }
   if (data.startsWith("APPROVE_MASTER:")) {
@@ -1180,10 +1385,9 @@ async function onCallback(cb) {
       await answerCb(cb.id, "⛔ Только админ может одобрять.", true);
       return;
     }
-    const adminChatId = chatId;
-    pendingMasterCity.set(String(adminChatId), applicantChatId);
-    await sendMessage(adminChatId, "🏙 Введите город для мастера (текстом). Например: Душанбе");
-    await answerCb(cb.id, "Ожидаю ввод города");
+    setState(chatId, "APPROVE_MASTER_NAME", { applicantChatId });
+    await sendMessage(chatId, "✏️ Введите имя мастера:");
+    await answerCb(cb.id, "Ожидаю ввод имени");
     return;
   }
   if (data.startsWith("DECLINE:")) {
@@ -1194,6 +1398,7 @@ async function onCallback(cb) {
       await answerCb(cb.id, "⛔ Только админ может отклонять.", true);
       return;
     }
+    logEvent({ actorId: chatId, action: "decline_access", targetId: applicantChatId, meta: null });
     await safeSend(applicantChatId, "❌ Доступ отклонён.");
     await answerCb(cb.id, "Отклонено.");
     return;
@@ -1235,16 +1440,25 @@ async function onCallback(cb) {
   const fromId = cb.from && cb.from.id;
   const isAdminCb = String(fromId) === String(SUPER_ADMIN_ID) || String(fromId) === String(ADMIN_CHAT_ID);
 
+  const isSuperAdminCb = String(fromId) === String(SUPER_ADMIN_ID);
   if (data === "MLIST:ACTIVE") {
     if (!isAdminCb) return;
-    const rows = [...activeMasterIds].map((tid) => [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }]);
+    const rows = [...activeMasterIds].map((tid) => {
+      const row = [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }];
+      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      return row;
+    });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
     await editMessage(chatId, messageId, "✅ Активные мастера:", { reply_markup: { inline_keyboard: rows } });
     return;
   }
   if (data === "MLIST:INACTIVE") {
     if (!isAdminCb) return;
-    const rows = [...inactiveMasterIds].map((tid) => [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }]);
+    const rows = [...inactiveMasterIds].map((tid) => {
+      const row = [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }];
+      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      return row;
+    });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
     await editMessage(chatId, messageId, "🗃 Неактивные мастера:", { reply_markup: { inline_keyboard: rows } });
     return;
@@ -1254,7 +1468,13 @@ async function onCallback(cb) {
     if (!isAdminCb) return;
     activeMasterIds.delete(String(tgId));
     inactiveMasterIds.add(String(tgId));
-    const rows = [...activeMasterIds].map((tid) => [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }]);
+    saveData();
+    logEvent({ actorId: chatId, action: "master_deactivate", targetId: tgId, meta: null });
+    const rows = [...activeMasterIds].map((tid) => {
+      const row = [{ text: `⛔ ${getMasterLabel(tid)}`, callback_data: `MASTER_DEACT:${tid}` }];
+      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      return row;
+    });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
     await editMessage(chatId, messageId, "✅ Активные мастера:", { reply_markup: { inline_keyboard: rows } });
     return;
@@ -1264,9 +1484,69 @@ async function onCallback(cb) {
     if (!isAdminCb) return;
     inactiveMasterIds.delete(String(tgId));
     activeMasterIds.add(String(tgId));
-    const rows = [...inactiveMasterIds].map((tid) => [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }]);
+    saveData();
+    logEvent({ actorId: chatId, action: "master_activate", targetId: tgId, meta: null });
+    const rows = [...inactiveMasterIds].map((tid) => {
+      const row = [{ text: `✅ ${getMasterLabel(tid)}`, callback_data: `MASTER_ACT:${tid}` }];
+      if (isSuperAdminCb) row.push({ text: "✏️ Имя/Город", callback_data: `MASTER_EDIT:${tid}` });
+      return row;
+    });
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
     await editMessage(chatId, messageId, "🗃 Неактивные мастера:", { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith("MASTER_EDIT:")) {
+    const tgId = data.slice("MASTER_EDIT:".length);
+    if (!isSuperAdminCb) return;
+    setState(chatId, "MASTER_EDIT_NAME", { targetTgId: tgId });
+    await sendMessage(chatId, "✏️ Введите новое имя мастера:");
+    await answerCb(cb.id).catch(() => {});
+    return;
+  }
+  if (data.startsWith("ROLE_EDIT:")) {
+    const targetChatId = data.slice("ROLE_EDIT:".length);
+    if (!isSuperAdminCb) return;
+    const rows = [
+      [{ text: "Set ADMIN", callback_data: `ROLE_SET_ADMIN:${targetChatId}` }, { text: "Set MASTER", callback_data: `ROLE_SET_MASTER:${targetChatId}` }],
+      [{ text: "❌ Отмена", callback_data: "CANCEL" }],
+    ];
+    await editMessage(chatId, messageId, `🔁 Роль для ${targetChatId}:`, { reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith("ROLE_SET_ADMIN:")) {
+    const targetChatId = data.slice("ROLE_SET_ADMIN:".length);
+    if (!isSuperAdminCb) return;
+    const sid = String(targetChatId);
+    authorizedRoles.set(sid, "ADMIN");
+    activeMasterIds.delete(sid);
+    if (userProfiles[sid]) { userProfiles[sid].role = "ADMIN"; userProfiles[sid].city = null; }
+    else userProfiles[sid] = { name: sid, city: null, role: "ADMIN", username: null };
+    authorizedMasterCity.delete(sid);
+    dynamicMasters.delete(sid);
+    saveData();
+    logEvent({ actorId: chatId, action: "role_change_admin", targetId: targetChatId, meta: null });
+    await editMessage(chatId, messageId, `✅ Роль установлена: ADMIN для ${targetChatId}`);
+    return;
+  }
+  if (data.startsWith("ROLE_SET_MASTER:")) {
+    const targetChatId = data.slice("ROLE_SET_MASTER:".length);
+    if (!isSuperAdminCb) return;
+    const sid = String(targetChatId);
+    const prof = userProfiles[sid];
+    if (prof && prof.city) {
+      authorizedRoles.set(sid, "MASTER");
+      activeMasterIds.add(sid);
+      if (userProfiles[sid]) userProfiles[sid].role = "MASTER"; else userProfiles[sid] = { name: sid, city: prof.city, role: "MASTER", username: null };
+      authorizedMasterCity.set(sid, prof.city);
+      dynamicMasters.set(sid, { name: prof.name || sid, city: prof.city });
+      saveData();
+      logEvent({ actorId: chatId, action: "role_change_master", targetId: targetChatId, meta: { city: prof.city } });
+      await editMessage(chatId, messageId, `✅ Роль установлена: MASTER (${prof.city})`);
+    } else {
+      setState(chatId, "ROLE_SET_MASTER_CITY", { targetTgId: targetChatId });
+      await sendMessage(chatId, "🏙 Введите город для мастера:");
+      await answerCb(cb.id).catch(() => {});
+    }
     return;
   }
 
@@ -1478,7 +1758,7 @@ async function onCallback(cb) {
     const acceptMsg = `✅ Мастер ${order.masterName} взял заявку #${order.id}${dayLabel}.`;
 
     if (order.adminChatId) {
-      await sendMessage(order.adminChatId, acceptMsg, { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(order.adminChatId, acceptMsg, { reply_markup: adminMenuReplyKeyboard(chatId) });
     }
     // Супер-админ всегда получает уведомление
     if (String(order.adminChatId) !== String(SUPER_ADMIN_ID)) {
@@ -1627,7 +1907,7 @@ async function onCallback(cb) {
       await sendMessage(
         order.adminChatId,
         `❌ Мастер ${order.masterName} отказался от заявки #${order.id}.`,
-        { reply_markup: adminMenuReplyKeyboard() }
+        { reply_markup: adminMenuReplyKeyboard(chatId) }
       );
     }
 
@@ -1640,7 +1920,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       await sendMessage(chatId, "⚠️ Заявка не найдена.", {
-        reply_markup: adminMenuReplyKeyboard(),
+        reply_markup: adminMenuReplyKeyboard(chatId),
       });
       return;
     }
@@ -1766,7 +2046,7 @@ async function onCallback(cb) {
         },
       }
     );
-    await sendMessage(chatId, "Ожидаем ответа мастера.", { reply_markup: adminMenuReplyKeyboard() });
+    await sendMessage(chatId, "Ожидаем ответа мастера.", { reply_markup: adminMenuReplyKeyboard(chatId) });
     return;
   }
 
@@ -1880,7 +2160,7 @@ async function onCallback(cb) {
       await sendMessage(
         order.adminChatId,
         `🚗 Клиент по заявке #${order.id} прибыл в сервис.`,
-        { reply_markup: adminMenuReplyKeyboard() }
+        { reply_markup: adminMenuReplyKeyboard(chatId) }
       );
     }
 
@@ -2097,14 +2377,14 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_PICK_MASTER:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_MASTER") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
     const masterTgId = Number(data.split(":")[1]);
     if (!activeMasterIds.has(String(masterTgId))) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     const masterInfo = getMasterInfo(masterTgId);
@@ -2189,7 +2469,7 @@ async function onCallback(cb) {
     const masterTgId = Number(data.split(":")[1]);
     if (!activeMasterIds.has(String(masterTgId))) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Мастер не найден.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     const masterInfo = getMasterInfo(masterTgId);
@@ -2200,7 +2480,7 @@ async function onCallback(cb) {
       `💬 Чат с мастером ${masterInfo.name} (${masterInfo.city}).\nНапишите сообщение. Для выхода нажмите «❌ Отмена».`
     );
     await sendMessage(chatId, "Можете писать сообщение мастеру.", {
-      reply_markup: adminMenuReplyKeyboard(),
+      reply_markup: adminMenuReplyKeyboard(chatId),
     });
     return;
   }
@@ -2209,7 +2489,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_TYPE:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_TYPE") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2217,7 +2497,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2238,7 +2518,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_LOG:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_LOGISTICS") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2246,7 +2526,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2285,7 +2565,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_OPT:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_OPTION") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2296,12 +2576,12 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
     if (optIndex < 0 || optIndex >= OPTIONS.length) {
-      await sendMessage(chatId, "⚠️ Опция не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Опция не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2325,7 +2605,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_OPT_CONFIRM:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_OPTION") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2333,7 +2613,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена. Начните заново.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2359,14 +2639,14 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_QTY_CUSTOM:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_QTY") {
-      await sendMessage(chatId, "⚠️ Сессия устарела.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     const orderId = data.split(":")[1];
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     const deviceName = order.options[st.data.qtyIdx];
@@ -2379,7 +2659,7 @@ async function onCallback(cb) {
   if (data.startsWith("ADMIN_QTY:")) {
     const st = getState(chatId);
     if (!st || st.step !== "ADMIN_WAIT_QTY") {
-      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Сессия устарела. Выберите действие:", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2389,7 +2669,7 @@ async function onCallback(cb) {
     const order = orders.get(orderId);
     if (!order) {
       clearState(chatId);
-      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
 
@@ -2443,7 +2723,7 @@ async function onCallback(cb) {
     const orderId = data.split(":")[1];
     const order = orders.get(orderId);
     if (!order) {
-      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard() });
+      await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     // Защита от повторной отправки (если уже отправлено через текстовый ввод)
@@ -2456,7 +2736,7 @@ async function onCallback(cb) {
     clearState(chatId);
     await sendOrderToMaster(order);
     await editMessage(chatId, messageId, formatAdminConfirm(order));
-    await sendMessage(chatId, "✅ Заявка отправлена мастеру.", { reply_markup: adminMenuReplyKeyboard() });
+    await sendMessage(chatId, "✅ Заявка отправлена мастеру.", { reply_markup: adminMenuReplyKeyboard(chatId) });
     return;
   }
 }
