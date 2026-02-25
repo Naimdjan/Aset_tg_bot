@@ -28,8 +28,11 @@ const BOT_PASSWORD = normalizePassword(process.env.BOT_PASSWORD || "");
 const authorizedChatIds = new Set(); // chatId строкой
 const seenMasters = new Set();       // мастера, уже подключавшиеся (сбрасывается при рестарте)
 
+function isAllowedWithoutApproval(chatId) {
+  return String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID) || isMasterChat(chatId);
+}
 function isAuthorized(chatId) {
-  return authorizedChatIds.has(String(chatId));
+  return isAllowedWithoutApproval(chatId) || authorizedChatIds.has(String(chatId));
 }
 function setAuthorized(chatId) {
   authorizedChatIds.add(String(chatId));
@@ -705,6 +708,26 @@ async function onMessage(message) {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
 
+  if (!isAuthorized(chatId)) {
+    await sendMessage(chatId, "⛔ Доступ не выдан. Запрос отправлен администратору.");
+    const from = message.from || {};
+    let msgType = "текст";
+    if (message.photo) msgType = "фото";
+    else if (message.document) msgType = "документ";
+    else if (message.video) msgType = "видео";
+    else if (message.voice) msgType = "голос";
+    else if (message.sticker) msgType = "стикер";
+    else if (message.video_note) msgType = "видеозаметка";
+    else if (message.contact) msgType = "контакт";
+    else if (message.location) msgType = "геолокация";
+    const content = message.text || message.caption || "(нет текста/подписи)";
+    const reqText = `Заявка на доступ:\nchatId: ${chatId}\nusername: @${from.username || "-"}\nИмя: ${from.first_name || "-"} ${from.last_name || "-"}\nТип: ${msgType}\nСодержимое: ${content}`;
+    const approveKb = { inline_keyboard: [[{ text: "✅ Approve", callback_data: `APPROVE:${chatId}` }, { text: "❌ Decline", callback_data: `DECLINE:${chatId}` }]] };
+    await safeSend(SUPER_ADMIN_ID, reqText, { reply_markup: approveKb });
+    if (String(ADMIN_CHAT_ID) !== String(SUPER_ADMIN_ID)) await safeSend(ADMIN_CHAT_ID, reqText, { reply_markup: approveKb });
+    return;
+  }
+
   // Уведомление админу при первом подключении мастера
   if (isMasterChat(chatId) && !seenMasters.has(String(chatId))) {
     seenMasters.add(String(chatId));
@@ -1079,6 +1102,35 @@ async function onCallback(cb) {
   const chatId = cb.message.chat.id;
   const messageId = cb.message.message_id;
   const data = cb.data || "";
+
+  if (data.startsWith("APPROVE:")) {
+    const applicantChatId = data.slice("APPROVE:".length);
+    const isAdmin = String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID);
+    if (!isAdmin) {
+      await answerCb(cb.id, "⛔ Только админ может одобрять.", true);
+      return;
+    }
+    authorizedChatIds.add(String(applicantChatId));
+    await sendMessage(applicantChatId, "✅ Доступ выдан. Меню активировано.", { reply_markup: menuKeyboardForChat(applicantChatId) });
+    await answerCb(cb.id, "Пользователь одобрен.");
+    return;
+  }
+  if (data.startsWith("DECLINE:")) {
+    const applicantChatId = data.slice("DECLINE:".length);
+    const isAdmin = String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID);
+    if (!isAdmin) {
+      await answerCb(cb.id, "⛔ Только админ может отклонять.", true);
+      return;
+    }
+    await safeSend(applicantChatId, "❌ Доступ отклонён.");
+    await answerCb(cb.id, "Отклонено.");
+    return;
+  }
+
+  if (!isAuthorized(chatId) && data !== "CANCEL") {
+    await answerCb(cb.id, "⛔ Доступ не выдан.", true);
+    return;
+  }
 
   // Сразу отвечаем на callback (убирает спиннер), не ожидая
   answerCb(cb.id).catch(() => {});
