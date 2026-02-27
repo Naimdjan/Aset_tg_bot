@@ -918,7 +918,7 @@ async function onMessage(message) {
   }
 
   if (st.step === "ADMIN_WAIT_ADDRESS") {
-    const orderId = st.data.orderId;
+    const orderId = String(st.data.orderId);
     const order = orders.get(orderId);
     if (!order) { clearState(chatId); await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) }); return; }
     order.address = text;
@@ -934,7 +934,7 @@ async function onMessage(message) {
 
   if (st.step === "ADMIN_WAIT_QTY_CUSTOM") {
     const { orderId, qtyIdx, quantities } = st.data;
-    const order = orders.get(orderId);
+    const order = orders.get(String(orderId));
     if (!order) { clearState(chatId); await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) }); return; }
     const qty = parseInt(text, 10);
     if (!qty || qty < 1 || qty > 999) { await sendMessage(chatId, "⚠️ Введите число от 1 до 999:"); return; }
@@ -1274,24 +1274,29 @@ async function onCallback(callbackQuery) {
       const t = st.data.fromTs; st.data.fromTs = st.data.toTs; st.data.toTs = t;
     }
     st.step = "REPORT_READY";
-    await editMessage(chatId, messageId, `✅ Выбран период.\nВ каком виде выгрузить?`, { inline_keyboard: [[{ text: "В сообщении (текст)", callback_data: "REPORT_TEXT" }, { text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] });
-    return;
+   await editMessage(chatId, messageId, `✅ Выбран период.\nВ каком виде выгрузить?`, { 
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "В сообщении (текст)", callback_data: "REPORT_TEXT" }, { text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }],
+          [{ text: "❌ Отмена", callback_data: "CANCEL" }]
+        ]
+      }
+    });
   }
 
-  if (data === "REPORT_TEXT" || data === "REPORT_EXCEL") {
+ if (data === "REPORT_TEXT" || data === "REPORT_EXCEL") {
     const st = getState(chatId);
     if (!st || st.step !== "REPORT_READY") {
-  await answerCb(callbackQuery.id);
-  await sendMessage(chatId, "⚠️ Сессия отчёта устарела. Нажмите «📊 Отчёт» и выберите период заново.");
-  return;
-}
+      await answerCb(callbackQuery.id);
+      await sendMessage(chatId, "⚠️ Сессия отчёта устарела. Нажмите «📊 Отчёт» и выберите период заново.");
+      return;
+    }
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const { scope, masterTgId } = st.data;
     
     if (data === "REPORT_TEXT") {
       await sendTextReport(chatId, st.data);
     } else {
-      // БАГ №3: ИСПРАВЛЕНА УТЕЧКА ПАМЯТИ (Excel удаляется в finally)
       let filePath;
       try {
         if (st.data.pending) {
@@ -1304,8 +1309,9 @@ async function onCallback(callbackQuery) {
           await sendDocument(chatId, filePath, `📊 Отчёт ${formatDate(from)}–${formatDate(to)}`);
         }
       } catch (err) {
+        // === ИЗМЕНЕНИЕ ЗДЕСЬ: Бот пришлет ошибку прямо в чат ===
         console.error("Excel report error:", err);
-        await sendMessage(chatId, "⚠️ Не удалось сформировать Excel. Попробуйте позже.");
+        await sendMessage(chatId, `⚠️ Ошибка Excel: ${err.message || err}\nПришлите этот текст разработчику.`);
       } finally {
         if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => {});
       }
@@ -1486,20 +1492,70 @@ async function onCallback(callbackQuery) {
     return;
   }
 
+ // === НАЧАЛО: ЗАПРОС ВРЕМЕНИ ПРИ ПРИНЯТИИ ЗАЯВКИ ===
   if (data.startsWith("MH:")) {
     const [, orderIdStr, yyyymmdd, hh] = data.split(":");
     const order = orders.get(orderIdStr);
     if (!order) return;
+
+    // Удаляем сообщение с выбором времени
+    await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+
+    // Показываем кнопки для выбора продолжительности работы
+    const timeKb = {
+      inline_keyboard: [
+        [{ text: "⏳ Меньше часа", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:0.5` }, { text: "1 час", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:1` }],
+        [{ text: "2 часа", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:2` }, { text: "3 часа", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:3` }],
+        [{ text: "4 часа", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:4` }, { text: "Более 5 часов", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:5` }]
+      ]
+    };
+    await sendMessage(chatId, `📅 Дата и время прибытия выбраны.\n⏳ Теперь укажите, сколько примерно времени займет эта работа:`, { reply_markup: timeKb });
+    return;
+  }
+
+  // Обработка выбранного времени и окончательное подтверждение
+  if (data.startsWith("DUR_PLAN:")) {
+    const [, orderIdStr, yyyymmdd, hh, hours] = data.split(":");
+    const order = orders.get(orderIdStr);
+    if (!order) return;
+
     const y = parseInt(yyyymmdd.slice(0, 4), 10);
     const m = parseInt(yyyymmdd.slice(4, 6), 10) - 1;
     const d = parseInt(yyyymmdd.slice(6, 8), 10);
     const selectedDate = new Date(y, m, d, parseInt(hh, 10), 0, 0);
+
     order.appointedDate = selectedDate.toISOString();
+    order.plannedHours = parseFloat(hours); // Сохраняем план
+    order.installHours = parseFloat(hours); // Предварительно пишем и в факт
     order.status = "ACCEPTED_BY_MASTER";
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
+    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status, plannedHours: hours } });
     saveData();
+
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
-    await sendMessage(chatId, `✅ Вы приняли заявку #${order.id} на ${formatDate(selectedDate)}.\nКогда приедете — нажмите «📍 Я на месте».`, { reply_markup: { inline_keyboard: [[{ text: "📍 Я на месте", callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
+
+    const tStr = hours === "0.5" ? "меньше часа" : (hours === "5" ? "более 5 часов" : `${hours} ч.`);
+
+    // Умная кнопка для мастера (с учетом логистики из Шага 6)
+    const btnText = order.logistics === "COME" ? "🤝 Клиент приехал" : "📍 Я на месте";
+    const msgGuide = order.logistics === "COME" ? "Когда клиент приедет к вам — нажмите кнопку ниже:" : "Когда приедете к клиенту — нажмите кнопку ниже:";
+    await sendMessage(chatId, `✅ Вы приняли заявку #${order.id} на ${formatDate(selectedDate)}\n⏳ Указанное время работы: ${tStr}.\n\n${msgGuide}`, { reply_markup: { inline_keyboard: [[{ text: btnText, callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
+
+    // Уведомление админа
+    const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
+    const notifMsg = `✅ Мастер ${order.masterName} принял заявку #${order.id} на ${formatDate(selectedDate)}.\n⏳ Запланировано времени: ${tStr}`;
+    await safeSend(adminChatIdImm, notifMsg);
+    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg);
+    return;
+  }
+  // === КОНЕЦ ===
+    
+    // === ИЗМЕНЕНИЕ 1: Умная кнопка и текст для мастера ===
+    const btnText = order.logistics === "COME" ? "🤝 Клиент приехал" : "📍 Я на месте";
+    const msgGuide = order.logistics === "COME" ? "Когда клиент приедет к вам — нажмите кнопку ниже:" : "Когда приедете к клиенту — нажмите кнопку ниже:";
+    await sendMessage(chatId, `✅ Вы приняли заявку #${order.id} на ${formatDate(selectedDate)}.\n${msgGuide}`, { reply_markup: { inline_keyboard: [[{ text: btnText, callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
+    // ====================================================
+    
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     const notifMsg = `✅ Мастер ${order.masterName} принял заявку #${order.id} на ${formatDate(selectedDate)}`;
     await safeSend(adminChatIdImm, notifMsg);
@@ -1518,15 +1574,21 @@ async function onCallback(callbackQuery) {
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
-    const notifMsg = `📍 Мастер прибыл: заявка #${order.id} (${order.masterName})`;
-    safeSend(adminChatIdImm, notifMsg);
-    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg);
+    
+    // === ИЗМЕНЕНИЕ 2: Умное уведомление для админа ===
+    const notifMsgAdmin = order.logistics === "COME" 
+      ? `🤝 Клиент прибыл к мастеру: заявка #${order.id} (${order.masterName})` 
+      : `📍 Мастер прибыл на место: заявка #${order.id} (${order.masterName})`;
+    safeSend(adminChatIdImm, notifMsgAdmin);
+    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsgAdmin);
+    // ====================================================
     
     if (kb) {
-      await sendMessage(chatId, `📍 Вы прибыли (Заявка #${order.id}).\n\nСделайте фото:`, { reply_markup: kb });
+      await sendMessage(chatId, `📍 Статус обновлен (Заявка #${order.id}).\n\nСделайте фото:`, { reply_markup: kb });
     } else {
       setState(chatId, "MASTER_WAIT_DONE", { orderId });
       await sendMessage(chatId, `📍 Заявка #${order.id}.\nФото не требуются. Жмите "Выполнено" по завершению.`, { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } });
+    }
     }
     return;
   }
@@ -1607,6 +1669,19 @@ async function onCallback(callbackQuery) {
     await safeSend(order.masterTgId, `✅ Ваша заявка #${order.id} закрыта администратором. Спасибо!`);
     return;
   }
+  // === НАЧАЛО: ВОЗВРАТ НА ДОРАБОТКУ ===
+  if (data.startsWith("ADMIN_RETURN:")) {
+    const orderId = data.split(":")[1];
+    const order = orders.get(String(orderId));
+    if (order) {
+      order.status = "Мастер на месте (ДОРАБОТКА)";
+      saveData();
+      await safeSend(order.masterTgId, `⚠️ <b>Внимание!</b> Заявка #${orderId} возвращена на доработку.\nСвяжитесь с администратором для уточнения деталей, затем снова отправьте фото выполненной работы.`);
+      await editMessage(chatId, messageId, `✅ Заявка #${orderId} возвращена мастеру на доработку (статус изменен).`);
+      return;
+    }
+  }
+  // === КОНЕЦ: ВОЗВРАТ ===
 }
 
 // =============================
