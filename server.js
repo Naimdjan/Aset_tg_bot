@@ -178,22 +178,9 @@ function pruneAuditLog() {
   if (auditLog.length > 300000) auditLog = auditLog.slice(-300000);
 }
 
-function logEvent(typeOrEv, details) {
-  let entry;
-  if (typeof typeOrEv === "string") {
-    const d = details || {};
-    entry = { ts: nowTjIso(), action: typeOrEv, actorId: d.actorId ?? null, targetId: d.targetId ?? null, meta: d.meta ?? null };
-  } else {
-    const ev = typeOrEv;
-    entry = { ts: nowTjIso(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
+function logEvent() {}
+
   }
-  try {
-    const actorId = entry.actorId;
-    const metaUser = entry?.meta?.user || null;
-    const prof = actorId && typeof userProfiles === "object" ? userProfiles[String(actorId)] : null;
-    entry.actorUsername = metaUser?.username || prof?.username || null;
-    entry.actorName = metaUser?.name || metaUser?.fullName || prof?.name || null;
-  } catch (e) {}
 
   auditLog.push(entry);
   pruneAuditLog();
