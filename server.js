@@ -1599,7 +1599,7 @@ async function onCallback(callbackQuery) {
     const slot = getPhotoSlots(order).find(s => s.key === photoType);
     const label = slot ? slot.label : photoType;
     answerCb(callbackQuery.id);
-    const pReq = await sendMessage(chatId, `📷 Жду фото для: ${label} (заявка #${orderIdStr})`);
+    const pReq = sendMessage(chatId, `📷 Жду фото для: ${label} (заявка #${orderIdStr})`);
     st = getState(chatId);
     if (st) st.data.frMsgId = pReq.data.message_id;
     return;
