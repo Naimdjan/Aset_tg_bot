@@ -44,8 +44,8 @@ const seenMasters = new Set();       // мастера, уже подключа�
 const pendingApprovalInfo = new Map(); // applicantChatId -> { username }
 
 // Роли: супер-админ и админ
-const SUPER_ADMIN_ID = 7862998301;   
-const ADMIN_CHAT_ID = 1987607156;    
+const SUPER_ADMIN_ID = 7862998301;
+const ADMIN_CHAT_ID = 1987607156;
 
 function isAllowedWithoutApproval(chatId) {
   return String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID) || isMasterChat(chatId);
@@ -64,18 +64,18 @@ const MASTERS = [
   { tgId: 8026685490, name: "Тест", city: "Ашт" },
   { tgId: 1099184597, name: "Абдухалим", city: "Душанбе" },
 ];
-const authorizedMasterCity = new Map();  
-const pendingMasterCity = new Map();     
-const activeMasterIds = new Set();      
-const inactiveMasterIds = new Set();    
-const dynamicMasters = new Map();      
+const authorizedMasterCity = new Map();
+const pendingMasterCity = new Map();
+const activeMasterIds = new Set();
+const inactiveMasterIds = new Set();
+const dynamicMasters = new Map();
 MASTERS.forEach((m) => activeMasterIds.add(String(m.tgId)));
 
 // In-memory storage (Обязательно объявляем до loadData)
 let lastOrderId = 0;
-const orders = new Map();    
-const userState = new Map(); 
-const dedupe = new Map();    
+const orders = new Map();
+const userState = new Map();
+const dedupe = new Map();
 
 // =============================
 // БАГ №2: ИСПРАВЛЕНА ПОТЕРЯ ЗАЯВОК (Save/Load Data)
@@ -192,14 +192,14 @@ function getPhotoSlots(order) {
   if (!opts.length) return [];
   const hasFMB125 = opts.includes("FMB125");
   const hasDutOpt = opts.includes("DUT");
-  const dutPaired = hasFMB125 && hasDutOpt; 
+  const dutPaired = hasFMB125 && hasDutOpt;
   const deviceCounts = {};
   const slots = [];
 
   const addUnitSlots = (name, unitIdx, hasDut) => {
     const n = unitIdx + 1;
     slots.push({ key: `${name}_${unitIdx}_device`, label: `${name}-${n}`, deviceName: name, photoType: "device", unitIdx, required: true });
-    if (name === "DUT") return; 
+    if (name === "DUT") return;
     if (hasDut) slots.push({ key: `${name}_${unitIdx}_dut`, label: `DUT-${n}|${name}-${n}`, deviceName: name, photoType: "dut", unitIdx, required: true });
     slots.push({ key: `${name}_${unitIdx}_odometer`, label: `Пробег ${name}-${n}`, deviceName: name, photoType: "odometer", unitIdx, required: false });
     slots.push({ key: `${name}_${unitIdx}_plate`, label: `Номер ${name}-${n}`, deviceName: name, photoType: "plate", unitIdx, required: false });
@@ -207,7 +207,7 @@ function getPhotoSlots(order) {
 
   for (const opt of opts) {
     if (ACCESSORIES.has(opt)) continue;
-    if (opt === "DUT" && dutPaired) continue; 
+    if (opt === "DUT" && dutPaired) continue;
     const qty = order.deviceQuantities?.[opt] || 1;
     const dutQty = dutPaired && opt === "FMB125" ? (order.deviceQuantities?.["DUT"] || 1) : 0;
     for (let i = 0; i < qty; i++) {
@@ -237,20 +237,47 @@ function cleanupDedupe() {
 }
 
 // =============================
-// БАГ №6: ИСПРАВЛЕНО УДАЛЕНИЕ ИСТОРИИ (Храним год)
+// БАГ №6: ИСПРАВЛЕНО УДАЛЕНИЕ ИСТОРИИ (Храним год + корректный timestamp)
 // =============================
 function cleanupOldOrders() {
   const maxAge = 365 * 24 * 60 * 60 * 1000; // 365 дней вместо 7
   const t = Date.now();
+
+  const parseTsToMs = (ts) => {
+    if (ts == null) return null;
+    if (typeof ts === "number" && Number.isFinite(ts)) return ts;
+    if (typeof ts !== "string") return null;
+    const s = ts.trim();
+    if (!s) return null;
+
+    const parsed = Date.parse(s);
+    if (!Number.isNaN(parsed)) return parsed;
+
+    const m = s.match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (m) {
+      const dd = Number(m[1]);
+      const mm = Number(m[2]);
+      const yyyy = Number(m[3]);
+      const HH = m[4] ? Number(m[4]) : 0;
+      const MI = m[5] ? Number(m[5]) : 0;
+      const SS = m[6] ? Number(m[6]) : 0;
+      const d = new Date(yyyy, mm - 1, dd, HH, MI, SS, 0);
+      const ms = d.getTime();
+      return Number.isNaN(ms) ? null : ms;
+    }
+    return null;
+  };
+
   for (const [id, order] of orders.entries()) {
     const terminal = ["CLOSED", "DECLINED_BY_MASTER"].includes(order.status);
     const ts = order.closedAt || order.completedAt || order.createdAt;
-    if (terminal && ts && t - new Date(ts).getTime() > maxAge) {
+    const tsMs = parseTsToMs(ts);
+    if (terminal && tsMs != null && (t - tsMs > maxAge)) {
       orders.delete(id);
     }
   }
 }
-setInterval(cleanupOldOrders, 60 * 60 * 1000); 
+setInterval(cleanupOldOrders, 60 * 60 * 1000);
 
 function setState(chatId, step, data = {}) { userState.set(String(chatId), { step, data }); }
 function getState(chatId) { return userState.get(String(chatId)) || null; }
@@ -272,15 +299,15 @@ async function safeSend(chatId, text, extra = {}) { return sendMessage(chatId, t
 
 async function forwardChatMessage(message, toChatId, fromLabel) {
   const cap = (extra) => extra ? `${fromLabel}:\n${extra}` : fromLabel;
-  if (message.text) { await safeSend(toChatId, `${fromLabel}:\n${message.text}`); } 
-  else if (message.photo?.length) { await tg("sendPhoto", { chat_id: toChatId, photo: message.photo[message.photo.length - 1].file_id, caption: cap(message.caption) }).catch(() => {}); } 
-  else if (message.document) { await tg("sendDocument", { chat_id: toChatId, document: message.document.file_id, caption: cap(message.caption) }).catch(() => {}); } 
-  else if (message.video) { await tg("sendVideo", { chat_id: toChatId, video: message.video.file_id, caption: cap(message.caption) }).catch(() => {}); } 
-  else if (message.voice) { await tg("sendVoice", { chat_id: toChatId, voice: message.voice.file_id, caption: cap(message.caption) }).catch(() => {}); } 
-  else if (message.audio) { await tg("sendAudio", { chat_id: toChatId, audio: message.audio.file_id, caption: cap(message.caption) }).catch(() => {}); } 
-  else if (message.video_note) { await safeSend(toChatId, fromLabel); await tg("sendVideoNote", { chat_id: toChatId, video_note: message.video_note.file_id }).catch(() => {}); } 
-  else if (message.sticker) { await safeSend(toChatId, `${fromLabel}: [стикер]`); await tg("sendSticker", { chat_id: toChatId, sticker: message.sticker.file_id }).catch(() => {}); } 
-  else if (message.contact) { await safeSend(toChatId, `${fromLabel}: 📱 Контакт`); await tg("sendContact", { chat_id: toChatId, phone_number: message.contact.phone_number, first_name: message.contact.first_name || "", last_name: message.contact.last_name || "" }).catch(() => {}); } 
+  if (message.text) { await safeSend(toChatId, `${fromLabel}:\n${message.text}`); }
+  else if (message.photo?.length) { await tg("sendPhoto", { chat_id: toChatId, photo: message.photo[message.photo.length - 1].file_id, caption: cap(message.caption) }).catch(() => {}); }
+  else if (message.document) { await tg("sendDocument", { chat_id: toChatId, document: message.document.file_id, caption: cap(message.caption) }).catch(() => {}); }
+  else if (message.video) { await tg("sendVideo", { chat_id: toChatId, video: message.video.file_id, caption: cap(message.caption) }).catch(() => {}); }
+  else if (message.voice) { await tg("sendVoice", { chat_id: toChatId, voice: message.voice.file_id, caption: cap(message.caption) }).catch(() => {}); }
+  else if (message.audio) { await tg("sendAudio", { chat_id: toChatId, audio: message.audio.file_id, caption: cap(message.caption) }).catch(() => {}); }
+  else if (message.video_note) { await safeSend(toChatId, fromLabel); await tg("sendVideoNote", { chat_id: toChatId, video_note: message.video_note.file_id }).catch(() => {}); }
+  else if (message.sticker) { await safeSend(toChatId, `${fromLabel}: [стикер]`); await tg("sendSticker", { chat_id: toChatId, sticker: message.sticker.file_id }).catch(() => {}); }
+  else if (message.contact) { await safeSend(toChatId, `${fromLabel}: 📱 Контакт`); await tg("sendContact", { chat_id: toChatId, phone_number: message.contact.phone_number, first_name: message.contact.first_name || "", last_name: message.contact.last_name || "" }).catch(() => {}); }
   else if (message.location) { await safeSend(toChatId, `${fromLabel}: 📍 Геолокация`); await tg("sendLocation", { chat_id: toChatId, latitude: message.location.latitude, longitude: message.location.longitude }).catch(() => {}); }
 }
 
@@ -355,7 +382,7 @@ function menuKeyboardForChat(chatId) {
   if (activeMasterIds.has(cid)) return masterMenuReplyKeyboard();
   if (cid === String(SUPER_ADMIN_ID) || cid === String(ADMIN_CHAT_ID)) return adminMenuReplyKeyboard(chatId);
   // Защита: если юзер деактивирован, но остался в authorizedChatIds, он не получит админку
-  return { remove_keyboard: true }; 
+  return { remove_keyboard: true };
 }
 
 function mastersKeyboard() {
@@ -418,7 +445,7 @@ function getMissingPhotoWarning(order) {
   const unitWarnings = {};
   for (const slot of slots) {
     if (slot.photoType !== "odometer" && slot.photoType !== "plate") continue;
-    if (devPhotos[slot.key] && devPhotos[slot.key] !== "SKIPPED") continue; 
+    if (devPhotos[slot.key] && devPhotos[slot.key] !== "SKIPPED") continue;
     const unitKey = `${slot.deviceName}_${slot.unitIdx}`;
     if (!unitWarnings[unitKey]) unitWarnings[unitKey] = { label: `${slot.deviceName}-${slot.unitIdx + 1}`, missing: [] };
     unitWarnings[unitKey].missing.push(slot.photoType === "odometer" ? "пробег" : "номер");
@@ -583,6 +610,7 @@ function installTimeKeyboard(orderId) {
     ],
   };
 }
+
 // =============================
 // Routes
 // =============================
@@ -832,7 +860,7 @@ async function onMessage(message) {
   if (text === "🔁 Роли" && String(chatId) === String(SUPER_ADMIN_ID)) {
     const allIds = new Set([...authorizedChatIds, ...activeMasterIds, ...Object.keys(userProfiles)]);
     if (ADMIN_CHAT_ID && String(ADMIN_CHAT_ID) !== String(SUPER_ADMIN_ID)) allIds.add(String(ADMIN_CHAT_ID));
-    
+
     const rows = [...allIds].slice(0, 50).map((cid) => {
       const p = userProfiles[cid];
       let role = authorizedRoles.get(cid);
@@ -847,7 +875,7 @@ async function onMessage(message) {
 
     if (rows.length === 0) rows.push([{ text: "Пользователей пока нет", callback_data: "NOOP" }]);
     rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
-    
+
     await sendMessage(chatId, "🔁 Смена ролей. Выберите пользователя для управления:", { reply_markup: { inline_keyboard: rows } });
     return;
   }
@@ -971,10 +999,10 @@ async function onMessage(message) {
   if (st.step === "MASTER_WAIT_PHOTO") {
     const orderId = st.data.orderId;
     const photoType = st.data.photoType;
-    const origMsgId = st.data.messageId; 
-    const frMsgId = st.data.frMsgId;   
+    const origMsgId = st.data.messageId;
+    const frMsgId = st.data.frMsgId;
     const order = orders.get(orderId);
-    
+
     if (!order || String(order.masterTgId) !== String(chatId)) {
       clearState(chatId);
       await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: masterMenuReplyKeyboard() });
@@ -983,8 +1011,7 @@ async function onMessage(message) {
 
     const photos = message.photo || [];
     let fileId = null;
-    
-    // Проверяем, фото ли это или документ-картинка
+
     if (photos.length > 0) {
       fileId = photos[photos.length - 1].file_id;
     } else if (message.document && message.document.mime_type?.startsWith("image/")) {
@@ -1002,12 +1029,12 @@ async function onMessage(message) {
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     if (!order.devicePhotos) order.devicePhotos = {};
     order.devicePhotos[photoType] = fileId;
-    
+
     const slot = getPhotoSlots(order).find(s => s.key === photoType);
     const photoLabel = slot ? slot.label : photoType;
     const photoDate = order.createdAt ? formatDate(new Date(order.createdAt)) : "—";
     const photoCaption = `📷 ${photoLabel}\n📋 Заявка #${order.id}\n📅 Дата: ${photoDate}\n📞 Клиент: ${order.phone || "—"}`;
-    
+
     await sendPhoto(adminChatIdImm, fileId, photoCaption).catch(() => {});
     if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) {
       sendPhoto(SUPER_ADMIN_ID, fileId, photoCaption).catch(() => {});
@@ -1032,7 +1059,7 @@ async function onMessage(message) {
       if (String(adminChatIdW) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
     }
     const doneText = `✅ Заявка #${order.id} — все фото сохранены.` + (warnMsg ? `\n\n${warnMsg}` : "") + `\n\n<b>По завершению работ нажмите «✅ Выполнено».</b>`;
-    
+
     if (origMsgId) {
       await tg("editMessageText", { chat_id: chatId, message_id: origMsgId, text: doneText, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } }).catch(() => {});
     } else {
@@ -1050,6 +1077,7 @@ async function onMessage(message) {
   clearState(chatId);
   await sendMessage(chatId, "⚠️ Сессия сброшена. Выберите действие:", { reply_markup: menuKeyboardForChat(chatId) });
 }
+
 async function onCallback(callbackQuery) {
   const chatId = callbackQuery.message?.chat?.id;
   const messageId = callbackQuery.message?.message_id;
@@ -1105,17 +1133,17 @@ async function onCallback(callbackQuery) {
     let role = authorizedRoles.get(cid) || "БЕЗ РОЛИ";
     if (activeMasterIds.has(cid)) role = "MASTER";
     const nameStr = p?.name ? p.name : (p?.username ? `@${p.username}` : cid);
-    // БАГ №11: Добавлена кнопка "Удалить доступ"
-    const kb = { inline_keyboard: [
-      [{ text: "👑 Set ADMIN", callback_data: `ROLE_SET:${cid}:ADMIN` }, { text: "👷 Set MASTER", callback_data: `ROLE_SET:${cid}:MASTER` }],
-      [{ text: "🗑 Удалить доступ", callback_data: `ROLE_REVOKE:${cid}` }],
-      [{ text: "❌ Отмена", callback_data: "CANCEL" }]
-    ]};
+    const kb = {
+      inline_keyboard: [
+        [{ text: "👑 Set ADMIN", callback_data: `ROLE_SET:${cid}:ADMIN` }, { text: "👷 Set MASTER", callback_data: `ROLE_SET:${cid}:MASTER` }],
+        [{ text: "🗑 Удалить доступ", callback_data: `ROLE_REVOKE:${cid}` }],
+        [{ text: "❌ Отмена", callback_data: "CANCEL" }]
+      ]
+    };
     await editMessage(chatId, messageId, `Управление: ${nameStr}\nТекущая роль: ${role}`, { reply_markup: kb });
     return;
   }
 
-  // БАГ №11: Обработчик полного удаления (Revoke)
   if (data.startsWith("ROLE_REVOKE:")) {
     const cid = data.split(":")[1];
     authorizedChatIds.delete(cid);
@@ -1177,11 +1205,13 @@ async function onCallback(callbackQuery) {
   if (data.startsWith("M_EDIT:")) {
     const tid = data.split(":")[1];
     const act = activeMasterIds.has(tid);
-    const kb = { inline_keyboard: [
-      [{ text: "✏️ Изменить Имя/Город", callback_data: `M_RENAME:${tid}` }],
-      [act ? { text: "⛔ Деактивировать", callback_data: `M_DEACT:${tid}` } : { text: "✅ Активировать", callback_data: `M_ACT:${tid}` }],
-      [{ text: "⬅ Назад", callback_data: "MLIST_BACK" }]
-    ]};
+    const kb = {
+      inline_keyboard: [
+        [{ text: "✏️ Изменить Имя/Город", callback_data: `M_RENAME:${tid}` }],
+        [act ? { text: "⛔ Деактивировать", callback_data: `M_DEACT:${tid}` } : { text: "✅ Активировать", callback_data: `M_ACT:${tid}` }],
+        [{ text: "⬅ Назад", callback_data: "MLIST_BACK" }]
+      ]
+    };
     await editMessage(chatId, messageId, `Управление мастером: ${getMasterLabel(tid)}`, { reply_markup: kb });
     return;
   }
@@ -1196,7 +1226,7 @@ async function onCallback(callbackQuery) {
     const tid = data.split(":")[1];
     activeMasterIds.delete(tid);
     inactiveMasterIds.add(tid);
-    clearState(tid); // БАГ №10: Сбрасываем стейт мастера, чтобы закрыть чаты
+    clearState(tid);
     saveData();
     logEvent({ actorId: chatId, action: "master_deactivate", targetId: tid });
     await answerCb(callbackQuery.id, "Мастер деактивирован");
@@ -1219,6 +1249,7 @@ async function onCallback(callbackQuery) {
     if (!st || st.step !== "REPORT_WAIT_PERIOD") { await answerCb(callbackQuery.id, "Устарело", true); return; }
     const p = data.split(":")[1];
     const { scope, masterTgId } = st.data;
+
     if (p === "PERIOD") {
       st.data.reportPeriod = "PERIOD";
       st.step = "REPORT_WAIT_START_DATE";
@@ -1226,6 +1257,7 @@ async function onCallback(callbackQuery) {
       await editMessage(chatId, messageId, "Свой период. Выберите дату НАЧАЛА:", { reply_markup: reportCalendarKeyboard("START", formatYyyymm(now.getFullYear(), now.getMonth() + 1)) });
       return;
     }
+
     if (p === "PENDING") {
       st.data.reportPeriod = "PENDING";
       st.data.pending = true;
@@ -1240,10 +1272,14 @@ async function onCallback(callbackQuery) {
       else if (p === "LAST_7") { fromTs = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime(); toTs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime(); }
       st.data.fromTs = fromTs; st.data.toTs = toTs;
     }
-    
+
     st.step = "REPORT_READY";
     const title = p === "PENDING" ? "⏳ Ожидающие заявки" : `Отчёт: ${p}`;
-    await editMessage(chatId, messageId, `✅ Выбрано: ${title}\nВ каком виде выгрузить?`, { inline_keyboard: [[{ text: "В сообщении (текст)", callback_data: "REPORT_TEXT" }, { text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] });
+    const formatKb = (p === "PENDING")
+      ? { inline_keyboard: [[{ text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] }
+      : { inline_keyboard: [[{ text: "В сообщении (текст)", callback_data: "REPORT_TEXT" }, { text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] };
+
+    await editMessage(chatId, messageId, `✅ Выбрано: ${title}\nВ каком виде выгрузить?`, { reply_markup: formatKb });
     return;
   }
 
@@ -1274,34 +1310,34 @@ async function onCallback(callbackQuery) {
       const t = st.data.fromTs; st.data.fromTs = st.data.toTs; st.data.toTs = t;
     }
     st.step = "REPORT_READY";
-    await editMessage(chatId, messageId, `✅ Выбран период.\nВ каком виде выгрузить?`, { inline_keyboard: [[{ text: "В сообщении (текст)", callback_data: "REPORT_TEXT" }, { text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] });
+    await editMessage(chatId, messageId, `✅ Выбран период.\nВ каком виде выгрузить?`, { reply_markup: { inline_keyboard: [[{ text: "В сообщении (текст)", callback_data: "REPORT_TEXT" }, { text: "Файл Excel (.xlsx)", callback_data: "REPORT_EXCEL" }], [{ text: "❌ Отмена", callback_data: "CANCEL" }]] } });
     return;
   }
 
   if (data === "REPORT_TEXT" || data === "REPORT_EXCEL") {
     const st = getState(chatId);
     if (!st || st.step !== "REPORT_READY") {
-  await answerCb(callbackQuery.id);
-  await sendMessage(chatId, "⚠️ Сессия отчёта устарела. Нажмите «📊 Отчёт» и выберите период заново.");
-  return;
-}
+      await answerCb(callbackQuery.id);
+      await sendMessage(chatId, "⚠️ Сессия отчёта устарела. Нажмите «📊 Отчёт» и выберите период заново.");
+      return;
+    }
+
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const { scope, masterTgId } = st.data;
-    
+
     if (data === "REPORT_TEXT") {
       await sendTextReport(chatId, st.data);
     } else {
-      // БАГ №3: ИСПРАВЛЕНА УТЕЧКА ПАМЯТИ (Excel удаляется в finally)
       let filePath;
       try {
         if (st.data.pending) {
           filePath = buildExcelReportPending({ scope, masterTgId });
           await sendDocument(chatId, filePath, "📋 Ожидающие заявки");
         } else {
-          const from = new Date(st.data.fromTs);
-          const to = new Date(st.data.toTs);
-          filePath = buildExcelReport(from, to, { scope, masterTgId });
-          await sendDocument(chatId, filePath, `📊 Отчёт ${formatDate(from)}–${formatDate(to)}`);
+          const fromD = new Date(st.data.fromTs);
+          const toD = new Date(st.data.toTs);
+          filePath = buildExcelReport(fromD, toD, { scope, masterTgId });
+          await sendDocument(chatId, filePath, `📊 Отчёт ${formatDate(fromD)}–${formatDate(toD)}`);
         }
       } catch (err) {
         console.error("Excel report error:", err);
@@ -1456,7 +1492,7 @@ async function onCallback(callbackQuery) {
     const order = orders.get(orderIdStr);
     if (!order) return;
     if (order.status !== "SENT_TO_MASTER" && order.status !== "PROPOSED_BY_ADMIN") { await answerCb(callbackQuery.id, "Заявка уже в другом статусе", true); return; }
-    
+
     if (dType === "CAL") {
       const now = new Date();
       await editMessage(chatId, messageId, `Заявка #${order.id}. Выберите месяц:`, { reply_markup: masterCalendarKeyboard(orderIdStr, formatYyyymm(now.getFullYear(), now.getMonth() + 1)) });
@@ -1499,7 +1535,12 @@ async function onCallback(callbackQuery) {
     logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
     saveData();
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
-    await sendMessage(chatId, `✅ Вы приняли заявку #${order.id} на ${formatDate(selectedDate)}.\nКогда приедете — нажмите «📍 Я на месте».`, { reply_markup: { inline_keyboard: [[{ text: "📍 Я на месте", callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
+    const isCome = order.logistics === "COME";
+    const arrivedText = isCome ? "🚪 Клиент приехал" : "📍 Я на месте";
+    const arrivedMsg = isCome
+      ? `✅ Вы приняли заявку #${order.id} на ${formatDate(selectedDate)}.\nКогда клиент приедет — нажмите «🚪 Клиент приехал».`
+      : `✅ Вы приняли заявку #${order.id} на ${formatDate(selectedDate)}.\nКогда приедете — нажмите «📍 Я на месте».`;
+    await sendMessage(chatId, arrivedMsg, { reply_markup: { inline_keyboard: [[{ text: arrivedText, callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     const notifMsg = `✅ Мастер ${order.masterName} принял заявку #${order.id} на ${formatDate(selectedDate)}`;
     await safeSend(adminChatIdImm, notifMsg);
@@ -1518,15 +1559,25 @@ async function onCallback(callbackQuery) {
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
-    const notifMsg = `📍 Мастер прибыл: заявка #${order.id} (${order.masterName})`;
+    const isCome = order.logistics === "COME";
+    const notifMsg = isCome
+      ? `🚪 Клиент приехал: заявка #${order.id} (${order.masterName})`
+      : `📍 Мастер прибыл: заявка #${order.id} (${order.masterName})`;
     safeSend(adminChatIdImm, notifMsg);
     if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg);
-    
+
     if (kb) {
-      await sendMessage(chatId, `📍 Вы прибыли (Заявка #${order.id}).\n\nСделайте фото:`, { reply_markup: kb });
+      const arrivedSelfMsg = isCome
+        ? `🚪 Клиент приехал (Заявка #${order.id}).\n\nСделайте фото:`
+        : `📍 Вы прибыли (Заявка #${order.id}).\n\nСделайте фото:`;
+      await sendMessage(chatId, arrivedSelfMsg, { reply_markup: kb });
     } else {
       setState(chatId, "MASTER_WAIT_DONE", { orderId });
-      await sendMessage(chatId, `📍 Заявка #${order.id}.\nФото не требуются. Жмите "Выполнено" по завершению.`, { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } });
+      const isCome2 = order.logistics === "COME";
+      const noPhotoMsg = isCome2
+        ? `🚪 Клиент приехал (Заявка #${order.id}).\nФото не требуются. Жмите "Выполнено" по завершению.`
+        : `📍 Вы прибыли (Заявка #${order.id}).\nФото не требуются. Жмите "Выполнено" по завершению.`;
+      await sendMessage(chatId, noPhotoMsg, { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } });
     }
     return;
   }
@@ -1539,8 +1590,8 @@ async function onCallback(callbackQuery) {
     const label = slot ? slot.label : photoType;
     await answerCb(callbackQuery.id);
     const pReq = await sendMessage(chatId, `📷 Жду фото для: ${label} (заявка #${orderIdStr})`);
-    st = getState(chatId);
-    if (st) st.data.frMsgId = pReq.data.message_id;
+    const st2 = getState(chatId);
+    if (st2) st2.data.frMsgId = pReq.data.message_id;
     return;
   }
 
@@ -1593,7 +1644,7 @@ async function onCallback(callbackQuery) {
     await editMessage(chatId, messageId, `⏳ Заявка #${orderId}. Укажите затраченное время:`, { reply_markup: installTimeKeyboard(orderId) });
     return;
   }
-  
+
   if (data.startsWith("INST_TIME:")) {
     const [, orderIdStr, hoursStr] = data.split(":");
     const order = orders.get(orderIdStr);
@@ -1610,7 +1661,7 @@ async function onCallback(callbackQuery) {
 }
 
 // =============================
-// Helper Functions 
+// Helper Functions
 // =============================
 async function sendOrderToMaster(order) {
   const kb = masterOrderKeyboard(order.id);
@@ -1680,7 +1731,7 @@ async function sendAuditExcel(chatId) {
     ];
     for (const entry of auditLog) {
       sheet.addRow([
-        formatDate(new Date(entry.ts)), // Нормальная дата вместо ISO
+        formatDate(new Date(entry.ts)),
         entry.action,
         entry.actorId || "",
         entry.actorUsername || "",
@@ -1740,11 +1791,10 @@ function getReportItems(from, to, opts) {
       }
       continue;
     }
-    
-    // БАГ №13: Ищем дату реального выполнения, а не создания заявки
+
     const realDate = o.completedAt || o.closedAt || o.createdAt;
     const t = new Date(realDate).getTime();
-    
+
     if (t < startTs || t > endTs) continue;
     if (opts.masterTgId && String(o.masterTgId) !== String(opts.masterTgId)) continue;
     result.push(o);
@@ -1833,28 +1883,28 @@ function checkOrderReminders() {
     if (order.status !== "ACCEPTED_BY_MASTER") continue;
     if (!order.appointedDate) continue;
     const est = new Date(order.appointedDate).getTime();
-    if (t < est) continue; 
-    
+    if (t < est) continue;
+
     if (!order.remindersSent) order.remindersSent = [];
     const diffMs = t - est;
     const diffMin = Math.floor(diffMs / 60000);
-    
+
     let reminder = 0;
     if (diffMin >= 120) reminder = 120;
     else if (diffMin >= 60) reminder = 60;
     else if (diffMin >= 30) reminder = 30;
-    
+
     if (reminder === 0 || order.remindersSent.includes(reminder)) continue;
     order.remindersSent.push(reminder);
     saveData();
-    
+
     const timeStr = reminder >= 60 ? `${reminder / 60} ч` : `${reminder} мин`;
     const adminId = order.adminChatId || SUPER_ADMIN_ID;
     const estNote = `\n(Назначено на: ${formatDate(new Date(order.appointedDate))})`;
-    
+
     safeSend(order.masterTgId, `⏰ <b>Напоминание:</b> вы должны были начать заявку #${order.id} ${timeStr} назад!${estNote}\nПожалуйста, нажмите «📍 Я на месте»!`, { parse_mode: "HTML" });
     safeSend(adminId, `⏰ Напоминание #${reminder}: заявка #${order.id} не закрыта!\n👷 Мастер: ${order.masterName}\n📊 Статус: ${statusLabel(order.status)}\n📞 Клиент: ${order.phone}\n⏱ Прошло: ${timeStr} с момента принятия${estNote}`);
-    
+
     if (String(adminId) !== String(SUPER_ADMIN_ID)) {
       safeSend(SUPER_ADMIN_ID, `⏰ Напоминание #${reminder}: заявка #${order.id} не закрыта!\n👷 Мастер: ${order.masterName}\n📊 Статус: ${statusLabel(order.status)}\n📞 Клиент: ${order.phone}\n⏱ Прошло: ${timeStr} с момента принятия${estNote}`);
     }
@@ -1864,7 +1914,6 @@ function checkOrderReminders() {
 setInterval(checkOrderReminders, 5 * 60 * 1000);
 
 // =============================
-// БАГ №6: ИСПРАВЛЕНА СИНТАКСИЧЕСКАЯ ОШИБКА (Лишняя скобка удалена)
 // Start server
 // =============================
 const PORT = process.env.PORT || 3000;
