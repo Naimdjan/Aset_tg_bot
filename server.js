@@ -1499,7 +1499,7 @@ async function onCallback(callbackQuery) {
     if (!order) return;
 
     // Удаляем сообщение с выбором времени
-    await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+    tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
 
     // Показываем кнопки для выбора продолжительности работы
     const timeKb = {
@@ -1509,7 +1509,7 @@ async function onCallback(callbackQuery) {
         [{ text: "4 часа", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:4` }, { text: "Более 5 часов", callback_data: `DUR_PLAN:${orderIdStr}:${yyyymmdd}:${hh}:5` }]
       ]
     };
-    await sendMessage(chatId, `📅 Дата и время прибытия выбраны.\n⏳ Теперь укажите, сколько примерно времени займет эта работа:`, { reply_markup: timeKb });
+    sendMessage(chatId, `📅 Дата и время прибытия выбраны.\n⏳ Теперь укажите, сколько примерно времени займет эта работа:`, { reply_markup: timeKb });
     return;
   }
 
@@ -1572,7 +1572,7 @@ async function onCallback(callbackQuery) {
     logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
     saveData();
     const kb = masterArrivalPhotoKeyboard(orderId, order);
-    await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+    tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     
     // === ИЗМЕНЕНИЕ 2: Умное уведомление для админа ===
@@ -1584,7 +1584,7 @@ async function onCallback(callbackQuery) {
     // ====================================================
     
     if (kb) {
-      await sendMessage(chatId, `📍 Статус обновлен (Заявка #${order.id}).\n\nСделайте фото:`, { reply_markup: kb });
+      sendMessage(chatId, `📍 Статус обновлен (Заявка #${order.id}).\n\nСделайте фото:`, { reply_markup: kb });
     } else {
       setState(chatId, "MASTER_WAIT_DONE", { orderId });
       await sendMessage(chatId, `📍 Заявка #${order.id}.\nФото не требуются. Жмите "Выполнено" по завершению.`, { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } });
@@ -1644,7 +1644,7 @@ async function onCallback(callbackQuery) {
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     const kb = { inline_keyboard: [[{ text: "👍 Подтвердить время", callback_data: `ADMIN_CONFIRM_TIME:${order.id}` }], [{ text: "❌ Возврат (недоделка)", callback_data: `ADMIN_RETURN:${order.id}` }]] };
     const notifMsg = `🎉 Мастер ${order.masterName} завершил заявку #${order.id}.\n` + formatOrderDetails(order) + `\nСколько времени занял монтаж?`;
-    await safeSend(adminChatIdImm, notifMsg, { reply_markup: kb });
+    safeSend(adminChatIdImm, notifMsg, { reply_markup: kb });
     if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg, { reply_markup: kb });
     return;
   }
