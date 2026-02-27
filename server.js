@@ -178,10 +178,9 @@ function pruneAuditLog() {
   if (auditLog.length > 300000) auditLog = auditLog.slice(-300000);
 }
 
-function logEvent() {}
+function logEvent() {};
 
 }
-
 
 const OPTIONS_DEVICES     = ["FMB920", "FMB125", "FMB140", "DUT"];
 const OPTIONS_ACCESSORIES = ["Реле", "Temp."];
