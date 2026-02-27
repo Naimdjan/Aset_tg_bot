@@ -180,14 +180,8 @@ function pruneAuditLog() {
 
 function logEvent() {}
 
-  }
-
-  auditLog.push(entry);
-  pruneAuditLog();
-  saveData();
 }
-loadData();
-setInterval(pruneAuditLog, 6 * 60 * 60 * 1000);
+
 
 const OPTIONS_DEVICES     = ["FMB920", "FMB125", "FMB140", "DUT"];
 const OPTIONS_ACCESSORIES = ["Реле", "Temp."];
