@@ -1280,7 +1280,11 @@ async function onCallback(callbackQuery) {
 
   if (data === "REPORT_TEXT" || data === "REPORT_EXCEL") {
     const st = getState(chatId);
-    if (!st || st.step !== "REPORT_READY") { await answerCb(callbackQuery.id, "Устарело", true); return; }
+    if (!st || st.step !== "REPORT_READY") {
+  await answerCb(callbackQuery.id);
+  await sendMessage(chatId, "⚠️ Сессия отчёта устарела. Нажмите «📊 Отчёт» и выберите период заново.");
+  return;
+}
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const { scope, masterTgId } = st.data;
     
