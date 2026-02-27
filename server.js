@@ -1589,8 +1589,7 @@ async function onCallback(callbackQuery) {
       setState(chatId, "MASTER_WAIT_DONE", { orderId });
       sendMessage(chatId, `📍 Заявка #${order.id}.\nФото не требуются. Жмите "Выполнено" по завершению.`, { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderId}` }]] } });
     }
-    }
-    return;
+      return;
   }
 
   if (data.startsWith("MASTER_PHOTO:")) {
