@@ -1611,10 +1611,10 @@ async function onCallback(callbackQuery) {
     if (!order) return;
     if (!order.devicePhotos) order.devicePhotos = {};
     order.devicePhotos[photoType] = "SKIPPED";
-    await answerCb(callbackQuery.id, "Пропущено");
+    answerCb(callbackQuery.id, "Пропущено");
     const kb = masterArrivalPhotoKeyboard(orderIdStr, order);
     if (kb) {
-      await editMessage(chatId, messageId, `📷 Заявка #${orderIdStr} — выберите следующее:`, { reply_markup: kb });
+     editMessage(chatId, messageId, `📷 Заявка #${orderIdStr} — выберите следующее:`, { reply_markup: kb });
     } else {
       setState(chatId, "MASTER_WAIT_DONE", { orderId: orderIdStr });
       const warnMsg = getMissingPhotoWarning(order);
@@ -1624,7 +1624,7 @@ async function onCallback(callbackQuery) {
         if (String(adminChatIdW) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, `⚠️ Заявка #${order.id} (${order.masterName}):\n${warnMsg}`);
       }
       const doneText = `✅ Заявка #${order.id} — все фото сохранены.` + (warnMsg ? `\n\n${warnMsg}` : "") + `\n\n<b>По завершению работ нажмите «✅ Выполнено».</b>`;
-      await editMessage(chatId, messageId, doneText, { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderIdStr}` }]] } });
+      editMessage(chatId, messageId, doneText, { parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${orderIdStr}` }]] } });
     }
     return;
   }
@@ -1638,8 +1638,8 @@ async function onCallback(callbackQuery) {
     logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
     saveData();
     clearState(chatId);
-    await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
-    await sendMessage(chatId, `🎉 Отлично! Заявка #${order.id} выполнена. Ожидайте подтверждения админа.`);
+    tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
+    sendMessage(chatId, `🎉 Отлично! Заявка #${order.id} выполнена. Ожидайте подтверждения админа.`);
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     const kb = { inline_keyboard: [[{ text: "👍 Подтвердить время", callback_data: `ADMIN_CONFIRM_TIME:${order.id}` }], [{ text: "❌ Возврат (недоделка)", callback_data: `ADMIN_RETURN:${order.id}` }]] };
     const notifMsg = `🎉 Мастер ${order.masterName} завершил заявку #${order.id}.\n` + formatOrderDetails(order) + `\nСколько времени занял монтаж?`;
@@ -1664,8 +1664,8 @@ async function onCallback(callbackQuery) {
     order.closedAt = nowTjIso();
     logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
     saveData();
-    await editMessage(chatId, messageId, `✅ Заявка #${order.id} полностью ЗАКРЫТА.\nУчтено: ${order.installHours} ч.`);
-    await safeSend(order.masterTgId, `✅ Ваша заявка #${order.id} закрыта администратором. Спасибо!`);
+    editMessage(chatId, messageId, `✅ Заявка #${order.id} полностью ЗАКРЫТА.\nУчтено: ${order.installHours} ч.`);
+    safeSend(order.masterTgId, `✅ Ваша заявка #${order.id} закрыта администратором. Спасибо!`);
     return;
   }
   // === НАЧАЛО: ВОЗВРАТ НА ДОРАБОТКУ ===
@@ -1688,7 +1688,7 @@ async function onCallback(callbackQuery) {
 // =============================
 async function sendOrderToMaster(order) {
   const kb = masterOrderKeyboard(order.id);
-  await safeSend(order.masterTgId, formatMasterOrder(order), { reply_markup: kb });
+  safeSend(order.masterTgId, formatMasterOrder(order), { reply_markup: kb });
 }
 
 function statusLabel(st) {
