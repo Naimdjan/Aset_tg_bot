@@ -314,6 +314,8 @@ function adminMenuReplyKeyboard(chatId) {
     }
   }
   if (chatId != null && String(chatId) === String(SUPER_ADMIN_ID)) {
+    rows.push([{ text: "➕ Добавить юзера (ID)" }, { text: "🔁 Роли" }]);
+    rows.push([{ text: "📇 Контакты (Excel)" }]);
   }
   return { keyboard: rows, resize_keyboard: true, one_time_keyboard: false, selective: false };
 }
@@ -741,6 +743,50 @@ async function onMessage(message) {
   // Обработка ручного ввода (Approve, Edit Name, City)
   if (String(chatId) === String(SUPER_ADMIN_ID) || String(chatId) === String(ADMIN_CHAT_ID)) {
     const stApp = getState(chatId);
+    // ADD USER BY ID (SUPER_ADMIN)
+    if (stApp && stApp.step === "ADD_USER_WAIT_ID") {
+      const rawId = text.replace(/\D/g, "");
+      if (!rawId || rawId.length < 5 || rawId.length > 12) { await sendMessage(chatId, "Введите корректный Telegram ID (5–12 цифр):"); return; }
+      clearState(chatId);
+      setState(chatId, "ADD_USER_PICK_ROLE", { applicantChatId: rawId });
+      const kb = { inline_keyboard: [
+        [{ text: "✅ Назначить MASTER", callback_data: `ADD_USER_ROLE:${rawId}:MASTER` }, { text: "✅ Назначить ADMIN", callback_data: `ADD_USER_ROLE:${rawId}:ADMIN` }],
+        [{ text: "❌ Отмена", callback_data: "CANCEL" }]
+      ]};
+      await sendMessage(chatId, `ID: ${rawId}\nВыберите роль:`, { reply_markup: kb });
+      return;
+    }
+    if (stApp && stApp.step === "ADD_USER_WAIT_NAME") {
+      const applicantChatId = stApp.data.applicantChatId;
+      const role = stApp.data.role;
+      const name = text.trim();
+      if (!name || name.length > 80) { await sendMessage(chatId, "Имя от 1 до 80 символов. Введите снова:"); return; }
+      setState(chatId, "ADD_USER_WAIT_CITY", { applicantChatId, role, name });
+      await sendMessage(chatId, "🏙 Введите город:");
+      return;
+    }
+    if (stApp && stApp.step === "ADD_USER_WAIT_CITY") {
+      const applicantChatId = stApp.data.applicantChatId;
+      const role = stApp.data.role;
+      const name = stApp.data.name;
+      const city = text.trim();
+      if (city.length < 2 || city.length > 40) { await sendMessage(chatId, "Город должен быть от 2 до 40 символов. Введите снова:"); return; }
+      clearState(chatId);
+      const sid = String(applicantChatId);
+      authorizedChatIds.add(sid);
+      authorizedRoles.set(sid, role);
+      userProfiles[sid] = { name, city, role, username: userProfiles[sid]?.username ?? null };
+      if (role === "MASTER") {
+        activeMasterIds.add(sid);
+        inactiveMasterIds.delete(sid);
+        authorizedMasterCity.set(sid, city);
+        dynamicMasters.set(sid, { name, city });
+      }
+      saveData();
+      await safeSend(applicantChatId, `✅ Доступ выдан. Роль: ${role}. Город: ${city}. Нажмите /start`, { reply_markup: role === "MASTER" ? masterMenuReplyKeyboard() : adminMenuReplyKeyboard(applicantChatId) });
+      await sendMessage(chatId, `✅ Пользователь добавлен: ${name} (${role}), ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
+      return;
+    }
     if (stApp && stApp.step === "APPROVE_MASTER_NAME") {
       const applicantChatId = stApp.data.applicantChatId;
       const name = text.trim();
@@ -828,6 +874,14 @@ async function onMessage(message) {
     }
   }
   if (text === "📇 Контакты (Excel)" && String(chatId) === String(SUPER_ADMIN_ID)) { await sendContactsExcel(chatId); return; }
+
+  // SUPER_ADMIN: Добавить пользователя по Telegram ID
+  if (text === "➕ Добавить юзера (ID)" && String(chatId) === String(SUPER_ADMIN_ID)) {
+    setState(chatId, "ADD_USER_WAIT_ID", {});
+    await sendMessage(chatId, "Введите Telegram ID пользователя (только цифры):", { reply_markup: adminMenuReplyKeyboard(chatId) });
+    return;
+  }
+
 
   // БАГ №1: ИСПРАВЛЕНА ФИЛЬТРАЦИЯ ДЛЯ КНОПКИ РОЛЕЙ
   if (text === "🔁 Роли" && String(chatId) === String(SUPER_ADMIN_ID)) {
@@ -1100,7 +1154,18 @@ async function onCallback(callbackQuery) {
     return;
   }
 
-  if (data.startsWith("ROLE_EDIT:")) {
+  
+  // SUPER_ADMIN: Add user by ID -> pick role
+  if (data.startsWith("ADD_USER_ROLE:")) {
+    const [, applicantChatId, role] = data.split(":");
+    if (String(chatId) !== String(SUPER_ADMIN_ID)) { await answerCb(callbackQuery.id, "Нет прав", true); return; }
+    clearState(chatId);
+    setState(chatId, "ADD_USER_WAIT_NAME", { applicantChatId, role });
+    await answerCb(callbackQuery.id);
+    await editMessage(chatId, messageId, `✅ Роль: ${role} для ${applicantChatId}.\nВведите имя:`);
+    return;
+  }
+if (data.startsWith("ROLE_EDIT:")) {
     const cid = data.split(":")[1];
     const p = userProfiles[cid];
     let role = authorizedRoles.get(cid) || "БЕЗ РОЛИ";
