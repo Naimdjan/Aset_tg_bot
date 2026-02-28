@@ -39,7 +39,6 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const authorizedChatIds = new Set(); // chatId строкой
 const authorizedRoles = new Map();   // chatId -> "MASTER"|"ADMIN"
 let userProfiles = {};               // chatId -> { name, city, role, username }
-let auditLog = [];                   // события аудита
 const seenMasters = new Set();       // мастера, уже подключавшиеся
 const pendingApprovalInfo = new Map(); // applicantChatId -> { username }
 
@@ -96,7 +95,6 @@ function loadData() {
       for (const [k, v] of Object.entries(j.authorizedRoles)) authorizedRoles.set(String(k), v);
     }
     if (j.userProfiles && typeof j.userProfiles === "object") userProfiles = j.userProfiles;
-    if (j.auditLog && Array.isArray(j.auditLog)) auditLog = j.auditLog;
     if (j.activeMasterIds && Array.isArray(j.activeMasterIds)) {
       activeMasterIds.clear();
       j.activeMasterIds.forEach((id) => activeMasterIds.add(String(id)));
@@ -129,7 +127,6 @@ function saveData() {
       authorizedChatIds: [...authorizedChatIds],
       authorizedRoles: Object.fromEntries(authorizedRoles),
       userProfiles,
-      auditLog,
       activeMasterIds: [...activeMasterIds],
       inactiveMasterIds: [...inactiveMasterIds],
       authorizedMasterCity: Object.fromEntries(authorizedMasterCity),
@@ -158,49 +155,7 @@ function nowTjIso() {
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}.${ms}+05:00`;
 }
 
-// -----------------------------
-// AUDIT retention (24 months)
-// -----------------------------
-function auditTsToMs(ts) {
-  const parsed = Date.parse(ts);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function pruneAuditLog() {
-  const maxAge = 730 * 24 * 60 * 60 * 1000; // ~24 месяца
-  const now = Date.now();
-  auditLog = auditLog.filter((e) => {
-    const ms = auditTsToMs(e.ts);
-    if (ms == null) return true;
-    return (now - ms) <= maxAge;
-  });
-  // safety cap: keep the newest events if something explodes
-  if (auditLog.length > 300000) auditLog = auditLog.slice(-300000);
-}
-
-function logEvent(typeOrEv, details) {
-  let entry;
-  if (typeof typeOrEv === "string") {
-    const d = details || {};
-    entry = { ts: nowTjIso(), action: typeOrEv, actorId: d.actorId ?? null, targetId: d.targetId ?? null, meta: d.meta ?? null };
-  } else {
-    const ev = typeOrEv;
-    entry = { ts: nowTjIso(), actorId: ev.actorId, action: ev.action, targetId: ev.targetId ?? null, meta: ev.meta ?? null };
-  }
-  try {
-    const actorId = entry.actorId;
-    const metaUser = entry?.meta?.user || null;
-    const prof = actorId && typeof userProfiles === "object" ? userProfiles[String(actorId)] : null;
-    entry.actorUsername = metaUser?.username || prof?.username || null;
-    entry.actorName = metaUser?.name || metaUser?.fullName || prof?.name || null;
-  } catch (e) {}
-
-  auditLog.push(entry);
-  pruneAuditLog();
-  saveData();
-}
 loadData();
-setInterval(pruneAuditLog, 6 * 60 * 60 * 1000);
 
 const OPTIONS_DEVICES     = ["FMB920", "FMB125", "FMB140", "DUT"];
 const OPTIONS_ACCESSORIES = ["Реле", "Temp."];
@@ -308,27 +263,17 @@ function clearState(chatId) { userState.delete(String(chatId)); }
 // Telegram helpers
 // =============================
 async function tg(method, payload) { return axios.post(`${TELEGRAM_API}/${method}`, payload, { timeout: 20000 }); }
-function logOutgoing(toChatId, kind, preview, meta = {}) {
-  logEvent({ actorId: "BOT", action: "outgoing", targetId: toChatId, meta: { kind, preview, ...meta } });
-}
-async function sendMessage(chatId, text, extra = {}) {
-  logOutgoing(chatId, "text", String(text || "").slice(0, 200));
-  return tg("sendMessage", { chat_id: chatId, text, ...extra });
-}
+async function sendMessage(chatId, text, extra = {}) { return tg("sendMessage", { chat_id: chatId, text, ...extra }); }
 async function editMessage(chatId, messageId, text, extra = {}) { return tg("editMessageText", { chat_id: chatId, message_id: messageId, text, ...extra }); }
 async function answerCb(callbackQueryId, text = null, showAlert = false) {
   const payload = { callback_query_id: callbackQueryId };
   if (text) { payload.text = text; payload.show_alert = showAlert; }
   return tg("answerCallbackQuery", payload).catch(() => {});
 }
-async function sendPhoto(chatId, fileId, caption) {
-  logOutgoing(chatId, "photo", String(caption || "").slice(0, 200), { fileId });
-  return tg("sendPhoto", { chat_id: chatId, photo: fileId, caption });
-}
+async function sendPhoto(chatId, fileId, caption) { return tg("sendPhoto", { chat_id: chatId, photo: fileId, caption }); }
 async function safeSend(chatId, text, extra = {}) { return sendMessage(chatId, text, extra).catch((e) => console.warn(`safeSend to ${chatId} failed: ${e?.message || e}`)); }
 
 async function forwardChatMessage(message, toChatId, fromLabel) {
-  logOutgoing(toChatId, "forward", String(fromLabel || "").slice(0, 120), { from: message?.chat?.id || message?.from?.id || null });
   const cap = (extra) => extra ? `${fromLabel}:\n${extra}` : fromLabel;
   if (message.text) { await safeSend(toChatId, `${fromLabel}:\n${message.text}`); }
   else if (message.photo?.length) { await tg("sendPhoto", { chat_id: toChatId, photo: message.photo[message.photo.length - 1].file_id, caption: cap(message.caption) }).catch(() => {}); }
@@ -348,7 +293,6 @@ async function sendDocument(chatId, filePath, caption) {
   form.append("chat_id", chatId);
   form.append("document", fs.createReadStream(filePath));
   if (caption) form.append("caption", caption);
-  logOutgoing(chatId, "document", String(caption || "").slice(0, 200), { filePath: path.basename(filePath) });
   return axios.post(`${TELEGRAM_API}/sendDocument`, form, { headers: form.getHeaders(), timeout: 30000, maxContentLength: Infinity, maxBodyLength: Infinity });
 }
 
@@ -370,7 +314,6 @@ function adminMenuReplyKeyboard(chatId) {
     }
   }
   if (chatId != null && String(chatId) === String(SUPER_ADMIN_ID)) {
-    rows.push([{ text: "📒 Журнал (Excel)" }, { text: "🔁 Роли" }, { text: "➕ Добавить юзера (ID)" }]);
   }
   return { keyboard: rows, resize_keyboard: true, one_time_keyboard: false, selective: false };
 }
@@ -526,7 +469,6 @@ function monthLabelShort(y, mo) { return `${MONTH_SHORT[mo - 1]} ${y}`; }
 function masterCalendarKeyboard(orderId, yyyymm) {
   const parsed = parseYyyymm(yyyymm);
   const now = new Date();
-  const todayStr = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}`;
   const year = parsed?.y || now.getFullYear();
   const month = parsed?.mo || now.getMonth() + 1;
   const daysInMonth = new Date(year, month, 0).getDate();
@@ -540,9 +482,7 @@ function masterCalendarKeyboard(orderId, yyyymm) {
     const row = [];
     for (let i = 0; i < 7; i++) {
       if ((week === 0 && i < dow) || day > daysInMonth) { row.push({ text: "·", callback_data: "NOOP" }); continue; }
-      const ymd = `${year}${pad2(month)}${pad2(day)}`;
-      if (ymd < todayStr) row.push({ text: String(day), callback_data: `NOOP_PAST_DATE:${ymd}` });
-      else row.push({ text: String(day), callback_data: `MD:${orderId}:${ymd}` });
+      row.push({ text: String(day), callback_data: `MD:${orderId}:${year}${pad2(month)}${pad2(day)}` });
       day++;
     }
     rows.push(row);
@@ -553,18 +493,10 @@ function masterCalendarKeyboard(orderId, yyyymm) {
 }
 
 function masterHourKeyboard(orderId, yyyymmdd) {
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}`;
-  const currHour = now.getHours();
   const hours = []; for (let h = 5; h <= 24; h++) hours.push(h);
   const rows = [];
   for (let i = 0; i < hours.length; i += 4) {
-    rows.push(hours.slice(i, i + 4).map((h) => {
-      const disabled = String(yyyymmdd) === String(todayStr) && h <= currHour;
-      return disabled
-        ? { text: `${pad2(h)}:00`, callback_data: `NOOP_PAST_TIME:${yyyymmdd}:${pad2(h)}` }
-        : { text: `${pad2(h)}:00`, callback_data: `MH:${orderId}:${yyyymmdd}:${pad2(h)}` };
-    }));
+    rows.push(hours.slice(i, i + 4).map((h) => ({ text: `${pad2(h)}:00`, callback_data: `MH:${orderId}:${yyyymmdd}:${pad2(h)}` })));
   }
   rows.push([{ text: "⬅ Дата", callback_data: `MB:${orderId}:${yyyymmdd.slice(0, 6)}` }]);
   rows.push([{ text: "❌ Отмена", callback_data: "CANCEL" }]);
@@ -681,12 +613,12 @@ app.post("/telegram/webhook", async (req, res) => {
       else if (msg.video_note) msgType = "video_note";
       else if (msg.contact) msgType = "contact";
       else if (msg.location) msgType = "location";
-      logEvent({ actorId: msg.chat?.id, action: "message", targetId: null, meta: { type: msgType, preview: (msg.text || msg.caption || "").slice(0, 150), user: { id: msg.from?.id, username: msg.from?.username || null, fullName: [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || null } } });
+
       await onMessage(update.message);
     }
     if (update.callback_query) {
       const cq = update.callback_query;
-      logEvent({ actorId: cq.from?.id, action: "callback", targetId: null, meta: { data: (cq.data || "").slice(0, 200), user: { id: cq.from?.id, username: cq.from?.username || null, fullName: [cq.from?.first_name, cq.from?.last_name].filter(Boolean).join(" ") || null } } });
+
       await onCallback(update.callback_query);
     }
   } catch (e) {
@@ -832,7 +764,7 @@ async function onMessage(message) {
       dynamicMasters.set(String(applicantChatId), { name, city });
       userProfiles[String(applicantChatId)] = { name, city, role: "MASTER", username: username ?? null };
       saveData();
-      logEvent({ actorId: chatId, action: "approve_master", targetId: applicantChatId, meta: { name, city } });
+
       await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: MASTER. Город: ${city}. Меню активировано.`, { reply_markup: masterMenuReplyKeyboard() });
       await sendMessage(chatId, `✅ Мастер активирован: ${name}, ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
@@ -841,25 +773,16 @@ async function onMessage(message) {
       const applicantChatId = stApp.data.applicantChatId;
       const name = text.trim();
       if (!name || name.length > 80) { await sendMessage(chatId, "Имя от 1 до 80 символов. Введите снова:"); return; }
-      setState(chatId, "APPROVE_ADMIN_CITY", { applicantChatId, name });
-      await sendMessage(chatId, "🏙 Введите город для администратора:");
-      return;
-    }
-    if (stApp && stApp.step === "APPROVE_ADMIN_CITY") {
-      const applicantChatId = stApp.data.applicantChatId;
-      const name = stApp.data.name;
-      const city = text.trim();
-      if (city.length < 2 || city.length > 40) { await sendMessage(chatId, "Город должен быть от 2 до 40 символов. Введите снова:"); return; }
       clearState(chatId);
       const username = pendingApprovalInfo.get(String(applicantChatId))?.username ?? userProfiles[String(applicantChatId)]?.username;
       pendingApprovalInfo.delete(String(applicantChatId));
       authorizedChatIds.add(String(applicantChatId));
       authorizedRoles.set(String(applicantChatId), "ADMIN");
-      userProfiles[String(applicantChatId)] = { name, city, role: "ADMIN", username: username ?? null };
+      userProfiles[String(applicantChatId)] = { name, city: null, role: "ADMIN", username: username ?? null };
       saveData();
-      logEvent({ actorId: chatId, action: "approve_admin", targetId: applicantChatId, meta: { name, city } });
-      await sendMessage(applicantChatId, `✅ Доступ выдан. Роль: ADMIN. Город: ${city}. Меню активировано.`, { reply_markup: adminMenuReplyKeyboard(applicantChatId) });
-      await sendMessage(chatId, `✅ Пользователь одобрен как ADMIN: ${name} (${city})`, { reply_markup: adminMenuReplyKeyboard(chatId) });
+
+      await sendMessage(applicantChatId, "✅ Доступ выдан. Роль: ADMIN. Меню активировано.", { reply_markup: adminMenuReplyKeyboard(applicantChatId) });
+      await sendMessage(chatId, `✅ Пользователь одобрен как ADMIN: ${name}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
     if (stApp && stApp.step === "MASTER_EDIT_NAME") {
@@ -882,7 +805,7 @@ async function onMessage(message) {
       dynamicMasters.set(sid, { name, city });
       authorizedMasterCity.set(sid, city);
       saveData();
-      logEvent({ actorId: chatId, action: "master_edit", targetId: targetTgId, meta: { name, city } });
+
       await sendMessage(chatId, `✅ Мастер обновлён: ${name}, ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
@@ -899,94 +822,12 @@ async function onMessage(message) {
       authorizedMasterCity.set(sid, city);
       dynamicMasters.set(sid, { name: userProfiles[sid].name || sid, city });
       saveData();
-      logEvent({ actorId: chatId, action: "role_change_master", targetId: targetTgId, meta: { city } });
+
       await sendMessage(chatId, `✅ Роль установлена: MASTER, город ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
       return;
     }
-
-    if (stApp && stApp.step === "ROLE_SET_ADMIN_CITY") {
-      const targetTgId = stApp.data.targetTgId;
-      const city = text.trim();
-      if (city.length < 2 || city.length > 40) { await sendMessage(chatId, "Город должен быть от 2 до 40 символов. Введите снова:"); return; }
-      clearState(chatId);
-      const sid = String(targetTgId);
-      authorizedRoles.set(sid, "ADMIN");
-      activeMasterIds.delete(sid);
-      inactiveMasterIds.delete(sid);
-      authorizedMasterCity.delete(sid);
-      dynamicMasters.delete(sid);
-      if (userProfiles[sid]) { userProfiles[sid].role = "ADMIN"; userProfiles[sid].city = city; }
-      else userProfiles[sid] = { name: sid, city, role: "ADMIN", username: null };
-      saveData();
-      logEvent({ actorId: chatId, action: "role_change_admin", targetId: targetTgId, meta: { city } });
-      await sendMessage(chatId, `✅ Роль установлена: ADMIN, город ${city}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
-      return;
-    }
-
-    if (stApp && stApp.step === "ADD_USER_WAIT_ID") {
-      const idStr = text.replace(/\D/g, "");
-      if (!idStr || idStr.length < 6 || idStr.length > 15) { await sendMessage(chatId, "⚠️ Введите Telegram ID (только цифры). Например: 123456789"); return; }
-      setState(chatId, "ADD_USER_WAIT_ROLE", { targetTgId: idStr });
-      await sendMessage(chatId, `Выберите роль для ID ${idStr}:`, {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "👷 MASTER", callback_data: `ADD_ROLE:${idStr}:MASTER` }, { text: "👑 ADMIN", callback_data: `ADD_ROLE:${idStr}:ADMIN` }],
-            [{ text: "❌ Отмена", callback_data: "CANCEL" }],
-          ],
-        },
-      });
-      return;
-    }
-
-    if (stApp && stApp.step === "ADD_USER_WAIT_NAME") {
-      const targetTgId = stApp.data.targetTgId;
-      const role = stApp.data.role;
-      const name = text.trim();
-      if (!name || name.length > 80) { await sendMessage(chatId, "Имя от 1 до 80 символов. Введите снова:"); return; }
-      setState(chatId, "ADD_USER_WAIT_CITY", { targetTgId, role, name });
-      await sendMessage(chatId, "🏙 Введите город:");
-      return;
-    }
-
-    if (stApp && stApp.step === "ADD_USER_WAIT_CITY") {
-      const targetTgId = stApp.data.targetTgId;
-      const role = stApp.data.role;
-      const name = stApp.data.name;
-      const city = text.trim();
-      if (city.length < 2 || city.length > 40) { await sendMessage(chatId, "Город должен быть от 2 до 40 символов. Введите снова:"); return; }
-      clearState(chatId);
-
-      const sid = String(targetTgId);
-      authorizedChatIds.add(sid);
-      authorizedRoles.set(sid, role);
-      userProfiles[sid] = { name, city, role, username: userProfiles[sid]?.username ?? null };
-
-      if (role === "MASTER") {
-        authorizedMasterCity.set(sid, city);
-        activeMasterIds.add(sid);
-        inactiveMasterIds.delete(sid);
-        dynamicMasters.set(sid, { name, city });
-      } else {
-        activeMasterIds.delete(sid);
-        inactiveMasterIds.delete(sid);
-        authorizedMasterCity.delete(sid);
-        dynamicMasters.delete(sid);
-      }
-
-      saveData();
-      logEvent({ actorId: chatId, action: "user_add_by_id", targetId: sid, meta: { role, name, city } });
-      await sendMessage(chatId, `✅ Пользователь добавлен: ${name} (${city}) — роль ${role}`, { reply_markup: adminMenuReplyKeyboard(chatId) });
-      await safeSend(sid, `✅ Вам выдан доступ. Роль: ${role}. Город: ${city}.`, { reply_markup: role === "MASTER" ? masterMenuReplyKeyboard() : adminMenuReplyKeyboard(sid) });
-      return;
-    }
   }
-
-  if (text === "📒 Журнал (Excel)" && String(chatId) === String(SUPER_ADMIN_ID)) { await sendAuditExcel(chatId); return; }
-  if (text === "➕ Добавить юзера (ID)" && String(chatId) === String(SUPER_ADMIN_ID)) {
-    setState(chatId, "ADD_USER_WAIT_ID", {});
-    await sendMessage(chatId, "Введите Telegram ID пользователя (цифрами):");
-    return;
-  }
+  if (text === "📇 Контакты (Excel)" && String(chatId) === String(SUPER_ADMIN_ID)) { await sendContactsExcel(chatId); return; }
 
   // БАГ №1: ИСПРАВЛЕНА ФИЛЬТРАЦИЯ ДЛЯ КНОПКИ РОЛЕЙ
   if (text === "🔁 Роли" && String(chatId) === String(SUPER_ADMIN_ID)) {
@@ -1079,7 +920,7 @@ async function onMessage(message) {
 
   if (st.step === "ADMIN_WAIT_ADDRESS") {
     const orderId = st.data.orderId;
-    const order = orders.get(String(orderId));
+    const order = orders.get(orderId);
     if (!order) { clearState(chatId); await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) }); return; }
     order.address = text;
     if (order.type === "REPAIR") {
@@ -1094,7 +935,7 @@ async function onMessage(message) {
 
   if (st.step === "ADMIN_WAIT_QTY_CUSTOM") {
     const { orderId, qtyIdx, quantities } = st.data;
-    const order = orders.get(String(orderId));
+    const order = orders.get(orderId);
     if (!order) { clearState(chatId); await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) }); return; }
     const qty = parseInt(text, 10);
     if (!qty || qty < 1 || qty > 999) { await sendMessage(chatId, "⚠️ Введите число от 1 до 999:"); return; }
@@ -1116,11 +957,11 @@ async function onMessage(message) {
 
   if (st.step === "ADMIN_WAIT_COMMENT") {
     const orderId = st.data.orderId;
-    const order = orders.get(String(orderId));
+    const order = orders.get(orderId);
     if (!order) { clearState(chatId); await sendMessage(chatId, "⚠️ Заявка не найдена.", { reply_markup: adminMenuReplyKeyboard(chatId) }); return; }
     order.adminComment = text;
     order.status = "SENT_TO_MASTER";
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
     clearState(chatId);
     await sendOrderToMaster(order);
     await sendMessage(chatId, formatAdminConfirm(order), { reply_markup: adminMenuReplyKeyboard(chatId) });
@@ -1133,7 +974,7 @@ async function onMessage(message) {
     const photoType = st.data.photoType;
     const origMsgId = st.data.messageId;
     const frMsgId = st.data.frMsgId;
-    const order = orders.get(String(orderId));
+    const order = orders.get(orderId);
 
     if (!order || String(order.masterTgId) !== String(chatId)) {
       clearState(chatId);
@@ -1216,8 +1057,6 @@ async function onCallback(callbackQuery) {
   const data = callbackQuery.data;
   const from = callbackQuery.from;
 
-  if (data.startsWith("NOOP_PAST_DATE")) { await answerCb(callbackQuery.id, "Нельзя выбрать прошедшую дату", true); return; }
-  if (data.startsWith("NOOP_PAST_TIME")) { await answerCb(callbackQuery.id, "Нельзя выбрать прошедшее время", true); return; }
   if (data === "NOOP") { await answerCb(callbackQuery.id); return; }
   if (data === "CANCEL") {
     clearState(chatId);
@@ -1261,16 +1100,6 @@ async function onCallback(callbackQuery) {
     return;
   }
 
-  // SUPER_ADMIN: добавление пользователя по ID
-  if (data.startsWith("ADD_ROLE:")) {
-    const [, cid, role] = data.split(":");
-    if (String(chatId) !== String(SUPER_ADMIN_ID)) { await answerCb(callbackQuery.id, "Нет прав", true); return; }
-    setState(chatId, "ADD_USER_WAIT_NAME", { targetTgId: cid, role });
-    await answerCb(callbackQuery.id);
-    await editMessage(chatId, messageId, `Введите имя для ${role} (ID ${cid}):`);
-    return;
-  }
-
   if (data.startsWith("ROLE_EDIT:")) {
     const cid = data.split(":")[1];
     const p = userProfiles[cid];
@@ -1281,7 +1110,6 @@ async function onCallback(callbackQuery) {
       inline_keyboard: [
         [{ text: "👑 Set ADMIN", callback_data: `ROLE_SET:${cid}:ADMIN` }, { text: "👷 Set MASTER", callback_data: `ROLE_SET:${cid}:MASTER` }],
         [{ text: "🗑 Удалить доступ", callback_data: `ROLE_REVOKE:${cid}` }],
-        [{ text: "🧨 Удалить НАВСЕГДА", callback_data: `ROLE_DELETE_FOREVER:${cid}` }],
         [{ text: "❌ Отмена", callback_data: "CANCEL" }]
       ]
     };
@@ -1299,41 +1127,26 @@ async function onCallback(callbackQuery) {
     authorizedMasterCity.delete(cid);
     clearState(cid);
     saveData();
-    logEvent({ actorId: chatId, action: "revoke_access", targetId: cid });
+
     await answerCb(callbackQuery.id, "Доступ аннулирован");
     await editMessage(chatId, messageId, `❌ Доступ пользователя ${cid} полностью удалён.`);
     await safeSend(cid, "⛔ Ваш доступ к системе аннулирован администратором.", { reply_markup: { remove_keyboard: true } });
     return;
   }
 
-  if (data.startsWith("ROLE_DELETE_FOREVER:")) {
-    const cid = data.split(":")[1];
-    if (String(cid) === String(SUPER_ADMIN_ID)) {
-      await answerCb(callbackQuery.id, "Нельзя удалить супер-админа", true);
-      return;
-    }
-    authorizedChatIds.delete(cid);
-    authorizedRoles.delete(cid);
-    activeMasterIds.delete(cid);
-    inactiveMasterIds.delete(cid);
-    dynamicMasters.delete(cid);
-    authorizedMasterCity.delete(cid);
-    delete userProfiles[cid];
-    clearState(cid);
-    saveData();
-    logEvent({ actorId: chatId, action: "user_delete_forever", targetId: cid });
-    await answerCb(callbackQuery.id, "Удалено");
-    await editMessage(chatId, messageId, `🧨 Пользователь ${cid} удалён НАВСЕГДА (логи сохранены).`);
-    await safeSend(cid, "⛔ Ваш доступ удалён навсегда администратором.", { reply_markup: { remove_keyboard: true } });
-    return;
-  }
-
   if (data.startsWith("ROLE_SET:")) {
     const [, cid, newRole] = data.split(":");
     if (newRole === "ADMIN") {
-      setState(chatId, "ROLE_SET_ADMIN_CITY", { targetTgId: cid });
-      await answerCb(callbackQuery.id);
-      await editMessage(chatId, messageId, `🏙 Введите город для ADMIN (ID ${cid}):`);
+      authorizedRoles.set(cid, "ADMIN");
+      activeMasterIds.delete(cid);
+      inactiveMasterIds.delete(cid);
+      authorizedMasterCity.delete(cid);
+      dynamicMasters.delete(cid);
+      if (userProfiles[cid]) { userProfiles[cid].role = "ADMIN"; userProfiles[cid].city = null; }
+      saveData();
+
+      await answerCb(callbackQuery.id, "Роль ADMIN установлена");
+      await editMessage(chatId, messageId, `✅ Пользователь ${cid} теперь ADMIN.`);
       return;
     }
     if (newRole === "MASTER") {
@@ -1388,7 +1201,7 @@ async function onCallback(callbackQuery) {
     inactiveMasterIds.add(tid);
     clearState(tid);
     saveData();
-    logEvent({ actorId: chatId, action: "master_deactivate", targetId: tid });
+
     await answerCb(callbackQuery.id, "Мастер деактивирован");
     await editMessage(chatId, messageId, `⛔ Мастер ${getMasterLabel(tid)} деактивирован.`);
     return;
@@ -1398,7 +1211,7 @@ async function onCallback(callbackQuery) {
     inactiveMasterIds.delete(tid);
     activeMasterIds.add(tid);
     saveData();
-    logEvent({ actorId: chatId, action: "master_activate", targetId: tid });
+
     await answerCb(callbackQuery.id, "Мастер активирован");
     await editMessage(chatId, messageId, `✅ Мастер ${getMasterLabel(tid)} активирован.`);
     return;
@@ -1511,59 +1324,6 @@ async function onCallback(callbackQuery) {
   }
 
   // --- ADMIN СЦЕНАРИИ ---
-  if (data.startsWith("ADMIN_PROPOSE_TIME:")) {
-    const orderId = data.split(":")[1];
-    const order = orders.get(String(orderId));
-    if (!order) { await answerCb(callbackQuery.id, "Заявка не найдена", true); return; }
-    const now = new Date();
-    await answerCb(callbackQuery.id);
-    await editMessage(chatId, messageId, `🗓 Заявка #${orderId}. Выберите дату (админ):`, {
-      reply_markup: adminProposeCalendarKeyboard(orderId, formatYyyymm(now.getFullYear(), now.getMonth() + 1)),
-    });
-    return;
-  }
-
-  if (data.startsWith("APROP_MN:")) {
-    const [, orderId, yyyymm] = data.split(":");
-    await editMessage(chatId, messageId, `🗓 Заявка #${orderId}. Выберите дату (админ):`, { reply_markup: adminProposeCalendarKeyboard(orderId, yyyymm) });
-    return;
-  }
-  if (data.startsWith("APROP_MD:")) {
-    const [, orderId, yyyymmdd] = data.split(":");
-    await editMessage(chatId, messageId, `⏰ Заявка #${orderId}. Выберите время (админ):`, { reply_markup: adminProposeHourKeyboard(orderId, yyyymmdd) });
-    return;
-  }
-  if (data.startsWith("APROP_MB:")) {
-    const [, orderId, yyyymm] = data.split(":");
-    await editMessage(chatId, messageId, `🗓 Заявка #${orderId}. Выберите дату (админ):`, { reply_markup: adminProposeCalendarKeyboard(orderId, yyyymm) });
-    return;
-  }
-  if (data.startsWith("APROP_MH:")) {
-    const [, orderIdStr, yyyymmdd, hh] = data.split(":");
-    const order = orders.get(String(orderIdStr));
-    if (!order) { await answerCb(callbackQuery.id, "Заявка не найдена", true); return; }
-    const y = parseInt(yyyymmdd.slice(0, 4), 10);
-    const m = parseInt(yyyymmdd.slice(4, 6), 10) - 1;
-    const d = parseInt(yyyymmdd.slice(6, 8), 10);
-    const selectedDate = new Date(y, m, d, parseInt(hh, 10), 0, 0);
-    if (selectedDate.getTime() < Date.now()) { await answerCb(callbackQuery.id, "Нельзя выбрать прошедшее время", true); return; }
-
-    order.proposedDate = selectedDate.toISOString();
-    order.status = "PROPOSED_BY_ADMIN";
-    logEvent({ actorId: chatId, action: "order_propose_time", targetId: order.id, meta: { proposed: order.proposedDate } });
-    saveData();
-
-    await editMessage(chatId, messageId, `✅ Предложено мастеру другое время: ${formatDate(selectedDate)} (заявка #${order.id}).`);
-
-    const kb = {
-      inline_keyboard: [
-        [{ text: "✅ Принять", callback_data: `MASTER_ACCEPT_PROPOSE:${order.id}` }, { text: "📅 Выбрать другое", callback_data: `MASTER_ACCEPT:${order.id}:CAL` }],
-      ],
-    };
-    await safeSend(order.masterTgId, `🗓 Админ предлагает другое время для заявки #${order.id}: <b>${formatDate(selectedDate)}</b>\nПринять?`, { parse_mode: "HTML", reply_markup: kb });
-    return;
-  }
-
   if (data.startsWith("ADMIN_PICK_MASTER:")) {
     const masterTgId = data.split(":")[1];
     const st = getState(chatId);
@@ -1608,7 +1368,6 @@ async function onCallback(callbackQuery) {
     };
     orders.set(String(lastOrderId), newOrder);
     saveData();
-    logEvent({ actorId: chatId, action: "order_create", targetId: lastOrderId });
 
     if (logistics === "COME") {
       newOrder.address = "Сам приедет";
@@ -1691,7 +1450,7 @@ async function onCallback(callbackQuery) {
     if (!order) return;
     order.adminComment = "—";
     order.status = "SENT_TO_MASTER";
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
     clearState(chatId);
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     await sendOrderToMaster(order);
@@ -1699,54 +1458,7 @@ async function onCallback(callbackQuery) {
     return;
   }
 
-  if (data.startsWith("ADMIN_RETURN:")) {
-    const orderId = data.split(":")[1];
-    const order = orders.get(String(orderId));
-    if (!order) { await answerCb(callbackQuery.id, "Заявка не найдена", true); return; }
-    order.status = "RETURNED_BY_ADMIN";
-    order.returnedAt = nowTjIso();
-    logEvent({ actorId: chatId, action: "order_return", targetId: order.id, meta: { status: order.status } });
-    saveData();
-
-    await answerCb(callbackQuery.id, "Возврат отправлен");
-    await editMessage(chatId, messageId, `❌ Возврат по заявке #${order.id} отправлен мастеру.`);
-
-    const kb = masterArrivalPhotoKeyboard(order.id, order);
-    if (kb) {
-      await safeSend(order.masterTgId, `❌ Админ вернул заявку #${order.id} на доработку.\nПожалуйста, добавьте недостающие фото:`, { reply_markup: kb });
-    } else {
-      await safeSend(order.masterTgId, `❌ Админ вернул заявку #${order.id} на доработку.\nПосле исправления нажмите «✅ Выполнено».`, { reply_markup: { inline_keyboard: [[{ text: "✅ Выполнено", callback_data: `MASTER_DONE:${order.id}` }]] } });
-    }
-    return;
-  }
-
   // --- МАСТЕР СЦЕНАРИИ ---
-  if (data.startsWith("MASTER_ACCEPT_PROPOSE:")) {
-    const orderIdStr = data.split(":")[1];
-    const order = orders.get(String(orderIdStr));
-    if (!order || !order.proposedDate) { await answerCb(callbackQuery.id, "Нет предложения", true); return; }
-    const selectedDate = new Date(order.proposedDate);
-    if (selectedDate.getTime() < Date.now()) { await answerCb(callbackQuery.id, "Время уже прошло", true); return; }
-    order.appointedDate = order.proposedDate;
-    delete order.proposedDate;
-    order.status = "ACCEPTED_BY_MASTER";
-    logEvent({ actorId: chatId, action: "order_accept_proposed", targetId: order.id, meta: { appointed: order.appointedDate } });
-    saveData();
-    await answerCb(callbackQuery.id, "Принято");
-    await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
-    const isCome = order.logistics === "COME";
-    const arrivedText = isCome ? "🚪 Клиент приехал" : "📍 Я на месте";
-    const arrivedMsg = isCome
-      ? `✅ Вы приняли время админа для заявки #${order.id} на ${formatDate(selectedDate)}.\nКогда клиент приедет — нажмите «🚪 Клиент приехал».`
-      : `✅ Вы приняли время админа для заявки #${order.id} на ${formatDate(selectedDate)}.\nКогда приедете — нажмите «📍 Я на месте».`;
-    await sendMessage(chatId, arrivedMsg, { reply_markup: { inline_keyboard: [[{ text: arrivedText, callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
-    const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
-    const notifMsg = `✅ Мастер принял предложенное время по заявке #${order.id}: ${formatDate(selectedDate)}`;
-    await safeSend(adminChatIdImm, notifMsg);
-    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg);
-    return;
-  }
-
   if (data.startsWith("MASTER_ACCEPT:")) {
     const [, orderIdStr, dType] = data.split(":");
     const order = orders.get(orderIdStr);
@@ -1790,14 +1502,9 @@ async function onCallback(callbackQuery) {
     const m = parseInt(yyyymmdd.slice(4, 6), 10) - 1;
     const d = parseInt(yyyymmdd.slice(6, 8), 10);
     const selectedDate = new Date(y, m, d, parseInt(hh, 10), 0, 0);
-    if (selectedDate.getTime() < Date.now()) {
-      await answerCb(callbackQuery.id, "Нельзя выбрать прошедшее время", true);
-      return;
-    }
     order.appointedDate = selectedDate.toISOString();
-    if (order.proposedDate) delete order.proposedDate;
     order.status = "ACCEPTED_BY_MASTER";
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
     saveData();
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
     const isCome = order.logistics === "COME";
@@ -1808,9 +1515,8 @@ async function onCallback(callbackQuery) {
     await sendMessage(chatId, arrivedMsg, { reply_markup: { inline_keyboard: [[{ text: arrivedText, callback_data: `MASTER_ARRIVED:${order.id}` }]] } });
     const adminChatIdImm = order.adminChatId || SUPER_ADMIN_ID;
     const notifMsg = `✅ Мастер ${order.masterName} принял заявку #${order.id} на ${formatDate(selectedDate)}`;
-    const proposeKb = { inline_keyboard: [[{ text: "🗓 Предложить другое время", callback_data: `ADMIN_PROPOSE_TIME:${order.id}` }]] };
-    await safeSend(adminChatIdImm, notifMsg, { reply_markup: proposeKb });
-    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg, { reply_markup: proposeKb });
+    await safeSend(adminChatIdImm, notifMsg);
+    if (String(adminChatIdImm) !== String(SUPER_ADMIN_ID)) safeSend(SUPER_ADMIN_ID, notifMsg);
     return;
   }
 
@@ -1820,7 +1526,7 @@ async function onCallback(callbackQuery) {
     if (!order) return;
     order.status = "ARRIVED";
     order.arrivedAt = nowTjIso();
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
     saveData();
     const kb = masterArrivalPhotoKeyboard(orderId, order);
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
@@ -1891,7 +1597,7 @@ async function onCallback(callbackQuery) {
     if (!order) return;
     order.status = "COMPLETED_BY_MASTER";
     order.completedAt = nowTjIso();
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
     saveData();
     clearState(chatId);
     await tg("deleteMessage", { chat_id: chatId, message_id: messageId }).catch(() => {});
@@ -1918,7 +1624,7 @@ async function onCallback(callbackQuery) {
     order.installHours = parseInt(hoursStr, 10);
     order.status = "CLOSED";
     order.closedAt = nowTjIso();
-    logEvent({ actorId: chatId, action: "order_status_change", targetId: order.id, meta: { status: order.status } });
+
     saveData();
     await editMessage(chatId, messageId, `✅ Заявка #${order.id} полностью ЗАКРЫТА.\nУчтено: ${order.installHours} ч.`);
     await safeSend(order.masterTgId, `✅ Ваша заявка #${order.id} закрыта администратором. Спасибо!`);
@@ -1942,7 +1648,6 @@ function statusLabel(st) {
     PROPOSED_BY_ADMIN: "Перенесено админом",
     ARRIVED: "Мастер на месте",
     COMPLETED_BY_MASTER: "Выполнено мастером",
-    RETURNED_BY_ADMIN: "Возврат админом",
     DECLINED_BY_MASTER: "Отказ мастера",
     CLOSED: "Закрыта (Оплачено)",
   };
@@ -1982,87 +1687,31 @@ function formatDate(d) {
 }
 
 // БАГ №12: ИСПРАВЛЕНА ДАТА В ОТЧЕТЕ АУДИТА
-async function sendAuditExcel(chatId) {
+
+async function sendContactsExcel(chatId) {
   let filePath;
   try {
     const workbook = new ExcelJS.Workbook();
-    const sheet = workbook.addWorksheet("Audit");
+    const sheet = workbook.addWorksheet("Contacts");
     sheet.columns = [
-      { header: "Дата/Время", key: "ts", width: 22 },
-      { header: "Событие", key: "action", width: 25 },
-      { header: "Actor ID", key: "actorId", width: 15 },
-      { header: "Actor Username", key: "actorUsername", width: 15 },
-      { header: "Actor Name", key: "actorName", width: 20 },
-      { header: "Target ID", key: "targetId", width: 15 },
-      { header: "Мета", key: "meta", width: 40 },
+      { header: "Role", key: "role", width: 15 },
+      { header: "ID", key: "id", width: 15 },
+      { header: "Имя", key: "name", width: 25 },
+      { header: "Username", key: "username", width: 15 },
+      { header: "Город", key: "city", width: 15 },
+      { header: "Статус", key: "status", width: 15 },
     ];
-    for (const entry of auditLog) {
-      sheet.addRow([
-        formatDate(new Date(entry.ts)),
-        entry.action,
-        entry.actorId || "",
-        entry.actorUsername || "",
-        entry.actorName || "",
-        entry.targetId || "",
-        entry.meta ? JSON.stringify(entry.meta) : ""
-      ]);
+    for (const cid of authorizedChatIds) {
+      const p = userProfiles[cid] || {};
+      const r = authorizedRoles.get(cid) || "NO_ROLE";
+      const st = r === "MASTER" ? (activeMasterIds.has(cid) ? "Активен" : "Неактивен") : "—";
+      sheet.addRow([r, cid, p.name || "", p.username || "", p.city || "", st]);
     }
-
-    const chatSheet = workbook.addWorksheet("Переписка");
-    chatSheet.columns = [
-      { header: "Дата/Время", key: "ts", width: 22 },
-      { header: "Направление", key: "dir", width: 10 },
-      { header: "From ID", key: "fromId", width: 15 },
-      { header: "From Username", key: "fromUser", width: 18 },
-      { header: "From Name", key: "fromName", width: 22 },
-      { header: "To ID", key: "toId", width: 15 },
-      { header: "Тип", key: "type", width: 14 },
-      { header: "Превью", key: "preview", width: 60 },
-    ];
-
-    for (const entry of auditLog) {
-      const ts = formatDate(new Date(entry.ts));
-      if (entry.action === "message") {
-        chatSheet.addRow([
-          ts,
-          "IN",
-          entry.actorId || "",
-          entry.actorUsername ? `@${entry.actorUsername}` : "",
-          entry.actorName || "",
-          "BOT",
-          entry.meta?.type || "message",
-          entry.meta?.preview || "",
-        ]);
-      } else if (entry.action === "callback") {
-        chatSheet.addRow([
-          ts,
-          "IN",
-          entry.actorId || "",
-          entry.actorUsername ? `@${entry.actorUsername}` : "",
-          entry.actorName || "",
-          "BOT",
-          "callback",
-          entry.meta?.data || "",
-        ]);
-      } else if (entry.action === "outgoing") {
-        chatSheet.addRow([
-          ts,
-          "OUT",
-          "BOT",
-          "",
-          "",
-          entry.targetId || "",
-          entry.meta?.kind || "out",
-          entry.meta?.preview || "",
-        ]);
-      }
-    }
-
-    filePath = path.join(os.tmpdir(), `audit_${Date.now()}.xlsx`);
+    filePath = path.join(os.tmpdir(), `contacts_${Date.now()}.xlsx`);
     await workbook.xlsx.writeFile(filePath);
-    await sendDocument(chatId, filePath, "📒 Журнал аудита");
+    await sendDocument(chatId, filePath, "📇 Контакты пользователей");
   } catch (e) {
-    console.error("sendAuditExcel error:", e);
+    console.error("sendContactsExcel error:", e);
   } finally {
     if (filePath && fs.existsSync(filePath)) fs.unlink(filePath, () => {});
   }
@@ -2075,7 +1724,7 @@ function getReportItems(from, to, opts) {
   const endTs = to ? to.getTime() : 0;
   for (const [, o] of orders.entries()) {
     if (opts.pending) {
-      if (["DRAFT", "SENT_TO_MASTER", "ACCEPTED_BY_MASTER", "PROPOSED_BY_ADMIN", "ARRIVED", "COMPLETED_BY_MASTER", "RETURNED_BY_ADMIN"].includes(o.status)) {
+      if (["DRAFT", "SENT_TO_MASTER", "ACCEPTED_BY_MASTER", "PROPOSED_BY_ADMIN", "ARRIVED", "COMPLETED_BY_MASTER"].includes(o.status)) {
         if (!opts.masterTgId || String(o.masterTgId) === String(opts.masterTgId)) result.push(o);
       }
       continue;
@@ -2094,77 +1743,28 @@ function getReportItems(from, to, opts) {
 async function sendTextReport(chatId, data) {
   const items = getReportItems(data.fromTs ? new Date(data.fromTs) : null, data.toTs ? new Date(data.toTs) : null, { pending: data.pending, masterTgId: data.masterTgId });
   if (items.length === 0) { await sendMessage(chatId, "📭 За этот период нет данных."); return; }
-  let totalHours = 0;
-  let totalDevs = 0;
-  const byKind = Object.fromEntries(OPTIONS.map((k) => [k, 0]));
-
-  items.forEach((o) => {
-    totalHours += (o.installHours || 0);
-    totalDevs += (o.totalDevices || 0);
-    const q = o.deviceQuantities || {};
-    for (const k of OPTIONS) byKind[k] += (q[k] || 0);
-  });
-
-  let txt = data.pending
-    ? "⏳ <b>Ожидающие заявки — итоги:</b>\n\n"
-    : `📊 <b>Итоги (${formatDate(new Date(data.fromTs))} – ${formatDate(new Date(data.toTs))}):</b>\n\n`;
-
+  let totalHours = 0; let totalDevs = 0;
+  items.forEach(o => { totalHours += (o.installHours || 0); totalDevs += (o.totalDevices || 0); });
+  let txt = data.pending ? "⏳ <b>Ожидающие заявки:</b>\n\n" : `📊 <b>Отчёт (${formatDate(new Date(data.fromTs))} – ${formatDate(new Date(data.toTs))}):</b>\n\n`;
   txt += `Всего заявок: ${items.length}\nУстройств: ${totalDevs}\nЧасов: ${totalHours}\n\n`;
-  txt += "<b>Установки по видам:</b>\n";
-  for (const k of OPTIONS) {
-    txt += `• ${k}: ${byKind[k]}\n`;
-  }
-
+  items.slice(0, 30).forEach(o => { txt += `🔹 <b>#${o.id}</b> | ${statusLabel(o.status)}\nМастер: ${o.masterName}\nКлиент: ${o.phone}\n\n`; });
+  if (items.length > 30) txt += `\n...и ещё ${items.length - 30} заявок. Выгрузите в Excel.`;
   await sendMessage(chatId, txt, { parse_mode: "HTML" });
 }
 
 // БАГ №4: ИСПРАВЛЕН ReferenceError (from/to вместо fromDate/toDate)
 function buildExcelReport(from, to, opts) {
   const items = getReportItems(from, to, opts);
-
   const wb = XLSX.utils.book_new();
-  const kindCols = [...OPTIONS];
-
-  const header = [
-    "ID",
-    "Создана",
-    "Начало работ мастера",
-    "Завершена",
-    "Статус",
-    "Телефон",
-    "Мастер",
-    "Тип",
-    "Логистика",
-    "Адрес",
-    "Опции",
-    ...kindCols,
-    "Устройств",
-    "Затрачено часов",
-    "Комментарий",
-  ];
-
   const wsData = [
     [`Период отчёта: ${formatDate(from)}–${formatDate(to)} (Asia/Dushanbe)`],
     [],
-    header,
+    ["ID", "Создана", "Завершена", "Статус", "Телефон", "Мастер", "Тип", "Логистика", "Адрес", "Опции", "Устройств", "Затрачено часов", "Комментарий"]
   ];
-
-  const totals = {
-    totalDevices: 0,
-    totalHours: 0,
-    byKind: Object.fromEntries(kindCols.map((k) => [k, 0])),
-  };
-
-  items.forEach((o) => {
-    const q = o.deviceQuantities || {};
-    for (const k of kindCols) totals.byKind[k] += (q[k] || 0);
-    totals.totalDevices += (o.totalDevices || 0);
-    totals.totalHours += (o.installHours || 0);
-
+  items.forEach(o => {
     wsData.push([
       o.id,
       formatDate(new Date(o.createdAt)),
-      o.arrivedAt ? formatDate(new Date(o.arrivedAt)) : "—",
       o.completedAt ? formatDate(new Date(o.completedAt)) : (o.closedAt ? formatDate(new Date(o.closedAt)) : "—"),
       statusLabel(o.status),
       o.phone,
@@ -2173,93 +1773,13 @@ function buildExcelReport(from, to, opts) {
       o.logistics === "COME" ? "Сам приедет" : "Выезд",
       o.address || "",
       (o.options || []).map(opt => `${opt}×${o.deviceQuantities?.[opt] || 1}`).join(", "),
-      ...kindCols.map((k) => q[k] || 0),
       o.totalDevices || 0,
       o.installHours || 0,
-      o.adminComment || "",
+      o.adminComment || ""
     ]);
   });
-
-  wsData.push([]);
-  wsData.push([
-    "ИТОГО",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    ...kindCols.map((k) => totals.byKind[k]),
-    totals.totalDevices,
-    totals.totalHours,
-    "",
-  ]);
-
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   XLSX.utils.book_append_sheet(wb, ws, "Отчёт");
-
-  // --- Sheet 2: Сводка по мастерам ---
-  const byMaster = new Map();
-  for (const o of items) {
-    const key = String(o.masterTgId || o.masterName || "—");
-    if (!byMaster.has(key)) {
-      const mi = o.masterTgId ? getMasterInfo(o.masterTgId) : { name: o.masterName || key, city: "—" };
-      byMaster.set(key, { masterId: o.masterTgId || key, name: mi.name || o.masterName || key, city: mi.city || "—", orders: 0, devices: 0, hours: 0, byKind: Object.fromEntries(kindCols.map((k) => [k, 0])) });
-    }
-    const rec = byMaster.get(key);
-    rec.orders += 1;
-    rec.devices += (o.totalDevices || 0);
-    rec.hours += (o.installHours || 0);
-    const q = o.deviceQuantities || {};
-    for (const k of kindCols) rec.byKind[k] += (q[k] || 0);
-  }
-
-  const msHeader = ["Мастер", "Город", "Заявок", "Устройств", "Часов", ...kindCols];
-  const msData = [
-    [`Сводка по мастерам: ${formatDate(from)}–${formatDate(to)}`],
-    [],
-    msHeader,
-  ];
-  const msTotals = { orders: 0, devices: 0, hours: 0, byKind: Object.fromEntries(kindCols.map((k) => [k, 0])) };
-  for (const rec of byMaster.values()) {
-    msTotals.orders += rec.orders;
-    msTotals.devices += rec.devices;
-    msTotals.hours += rec.hours;
-    for (const k of kindCols) msTotals.byKind[k] += rec.byKind[k];
-    msData.push([
-      rec.name,
-      rec.city,
-      rec.orders,
-      rec.devices,
-      rec.hours,
-      ...kindCols.map((k) => rec.byKind[k]),
-    ]);
-  }
-  msData.push([]);
-  msData.push(["ИТОГО", "", msTotals.orders, msTotals.devices, msTotals.hours, ...kindCols.map((k) => msTotals.byKind[k])]);
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(msData), "Сводка_мастера");
-
-  // --- Sheet 3: Сводка по устройствам/аксессуарам ---
-  const kindData = [
-    [`Сводка по видам: ${formatDate(from)}–${formatDate(to)}`],
-    [],
-    ["Вид", "Категория", "Количество"],
-  ];
-  let kindsTotal = 0;
-  for (const k of kindCols) {
-    const cat = OPTIONS_DEVICES.includes(k) ? "Устройство" : (OPTIONS_ACCESSORIES.includes(k) ? "Аксессуар" : "Другое");
-    const val = totals.byKind[k] || 0;
-    kindsTotal += val;
-    kindData.push([k, cat, val]);
-  }
-  kindData.push([]);
-  kindData.push(["ИТОГО", "", kindsTotal]);
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(kindData), "Сводка_устройства");
-
   const filePath = path.join(os.tmpdir(), `report_${Date.now()}.xlsx`);
   XLSX.writeFile(wb, filePath);
   return filePath;
@@ -2273,9 +1793,7 @@ function buildExcelReportPending(opts) {
     [],
     ["ID", "Создана", "Статус", "Прошло времени", "Телефон", "Мастер", "Тип", "Логистика", "Адрес", "Опции", "Комментарий"]
   ];
-  let totalDevs = 0;
   items.forEach(o => {
-    totalDevs += (o.totalDevices || 0);
     wsData.push([
       o.id,
       formatDate(new Date(o.createdAt)),
@@ -2290,8 +1808,6 @@ function buildExcelReportPending(opts) {
       o.adminComment || ""
     ]);
   });
-  wsData.push([]);
-  wsData.push(["ИТОГО", "", "", "", "", "", "", "", "", `Устройств: ${totalDevs}`, `Заявок: ${items.length}`]);
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   XLSX.utils.book_append_sheet(wb, ws, "Pending");
   const filePath = path.join(os.tmpdir(), `report_pending_${Date.now()}.xlsx`);
@@ -2330,7 +1846,7 @@ function checkOrderReminders() {
     if (String(adminId) !== String(SUPER_ADMIN_ID)) {
       safeSend(SUPER_ADMIN_ID, `⏰ Напоминание #${reminder}: заявка #${order.id} не закрыта!\n👷 Мастер: ${order.masterName}\n📊 Статус: ${statusLabel(order.status)}\n📞 Клиент: ${order.phone}\n⏱ Прошло: ${timeStr} с момента принятия${estNote}`);
     }
-    logEvent({ actorId: null, action: "order_reminder", targetId: order.id, meta: { reminder, status: order.status } });
+
   }
 }
 setInterval(checkOrderReminders, 5 * 60 * 1000);
