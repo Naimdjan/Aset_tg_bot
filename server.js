@@ -222,7 +222,7 @@ function cleanupDedupe() {
 
 // Удаляем закрытые/выполненные заявки старше 7 дней (защита от утечки памяти)
 function cleanupOldOrders() {
-  const maxAge = 7 * 24 * 60 * 60 * 1000;
+  const maxAge = 10 * 365 * 24 * 60 * 60 * 1000;
   const t = Date.now();
   for (const [id, order] of orders.entries()) {
     const terminal = ["CLOSED", "DECLINED_BY_MASTER"].includes(order.status);
@@ -3499,7 +3499,7 @@ async function checkOrderReminders() {
 }
 
 // Проверяем раз в 5 минут
-setInterval(checkOrderReminders, 5 * 60 * 1000);
+//setInterval(checkOrderReminders, 5 * 60 * 1000);
 
 // =============================
 // Start server
