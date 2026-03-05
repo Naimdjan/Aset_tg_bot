@@ -220,9 +220,9 @@ function cleanupDedupe() {
   }
 }
 
-// Удаляем закрытые/выполненные заявки старше 7 дней (защита от утечки памяти)
 function cleanupOldOrders() {
-  const maxAge = 10 * 365 * 24 * 60 * 60 * 1000;
+  // Устанавливаем срок хранения 100 лет (фактически навсегда)
+  const maxAge = 100 * 365 * 24 * 60 * 60 * 1000; 
   const t = Date.now();
   for (const [id, order] of orders.entries()) {
     const terminal = ["CLOSED", "DECLINED_BY_MASTER"].includes(order.status);
